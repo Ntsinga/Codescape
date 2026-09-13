@@ -1,6 +1,8 @@
 # Codescape
 
-**An explorable atlas of any codebase.** Upload a repo and Codescape maps it into a navigable system model — zoom from high-level capabilities down through files and functions to the source itself, like an atlas that goes from continents to streets.
+Codescape maps any codebase into a 3D interactive set of layers, explaining it from a system and conceptual level all the way down to the file and code level. The intention is to be able to know and understand a system/repo at a few glances — instantly seeing where everything is, its purpose in the overall system, and how it connects.
+
+**An explorable atlas of any codebase.** Upload a repo and Codescape builds a navigable system model — zoom from high-level capabilities down through files and functions to the source itself, like an atlas that goes from continents to streets.
 
 Supports TypeScript/JavaScript, Python, and C#. Explore the model as a conceptual **Map** or the raw **Files** structure, in 3D or 2D, with a source-linked code viewer. AI naming/explanations (via OpenAI or Google Gemini, with automatic fallback) are optional and always tied to the exact source lines used.
 
@@ -13,7 +15,7 @@ cd backend && npm install
 cd ../frontend && npm install
 ```
 
-Copy `backend/.env.example` to `backend/.env` and set `OPENAI_API_KEY` if you want the "Explain" feature (everything else works without it).
+Copy `backend/.env.example` to `backend/.env` and set `OPENAI_API_KEY` and/or `GEMINI_API_KEY` for AI naming/explanations (everything else works without a key). `GEMINI_MODEL` / `OPENAI_MODEL` pick the model, and `AI_PROVIDER` forces one; otherwise whichever key is present is used, with automatic fallback to the other.
 
 ## Run
 
@@ -38,4 +40,4 @@ Open http://localhost:5173. The frontend proxies `/api` to the backend on port 4
 
 ## What's deliberately out of scope for this pass
 
-GitHub/GitLab live connection and incremental sync, automatic UI mock-up generation, and full domain/architecture AI reasoning. Repository access should use GitHub/GitLab OAuth with a consent screen and repository picker; users should never paste personal access tokens. Authentication for ICM itself and multi-tenant deployment are intentionally not planned for the current product phase.
+Incremental sync of live repositories, automatic UI mock-up generation, and full domain/architecture AI reasoning. Repository access uses GitHub OAuth with a consent screen and repository picker; users never paste personal access tokens. Authentication for Codescape itself and multi-tenant deployment are intentionally not planned for the current product phase.
