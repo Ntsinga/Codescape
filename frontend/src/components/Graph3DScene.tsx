@@ -57,27 +57,28 @@ interface LayoutNode {
 }
 
 /**
- * Lays children out as stacked rings forming a 3D cone/tower around the centre,
- * rather than one flat ring. Radius per ring is bounded by its own node count, so
- * hundreds of children stay navigable and the shape reads as an interconnected
- * tree with real depth.
+ * Spreads children evenly around the parent using a Fibonacci-sphere distribution,
+ * with the radius scaled to the child count so neighbours keep a roughly constant
+ * gap (no overlap, no squeezing). Links radiate from the centre, reading as a
+ * proper radial tree you orbit around. The sphere is flattened vertically so it
+ * feels like a canopy rather than a ball.
  */
 function layoutChildren(children: ExplorerNode[]): LayoutNode[] {
   const n = children.length;
   if (n === 0) return [];
+  if (n === 1) return [{ node: children[0], position: [0, 0, 6] }];
 
-  const perRing = Math.max(6, Math.round(Math.sqrt(n) * 2));
-  const ringGap = 2.4; // vertical spacing between rings
-  const nodeArc = 1.5; // horizontal spacing between nodes on a ring
+  const spacing = 4.2; // desired gap between neighbouring nodes (fits labels)
+  const radius = Math.max(6, (spacing * Math.sqrt(n)) / 2.4);
+  const golden = Math.PI * (3 - Math.sqrt(5)); // ~2.399963 rad
 
   return children.map((node, i) => {
-    const ring = Math.floor(i / perRing);
-    const idxInRing = i % perRing;
-    const countInRing = Math.min(perRing, n - ring * perRing);
-    const ringRadius = Math.max(3.4, (countInRing * nodeArc) / (2 * Math.PI));
-    const angle = (idxInRing / Math.max(countInRing, 1)) * Math.PI * 2 + ring * 0.5;
-    const y = ring * ringGap;
-    return { node, position: [Math.cos(angle) * ringRadius, y, Math.sin(angle) * ringRadius] };
+    const y = 1 - (i / (n - 1)) * 2; // 1 → -1
+    const rAtY = Math.sqrt(Math.max(0, 1 - y * y));
+    const theta = golden * i;
+    const x = Math.cos(theta) * rAtY * radius;
+    const z = Math.sin(theta) * rAtY * radius;
+    return { node, position: [x, y * radius * 0.55, z] }; // flatten Y into a canopy
   });
 }
 
@@ -440,7 +441,7 @@ function SceneContent() {
   const children = focusNodeId ? childrenByParent.get(focusNodeId) ?? [] : [];
   const layout = useMemo(() => layoutChildren(children), [children]);
   const { radius, height } = layoutExtent(layout);
-  const dense = layout.length > 60;
+  const dense = layout.length > 40;
   const maxDist = radius * 3 + height * 2 + 30;
 
   return (
