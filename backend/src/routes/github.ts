@@ -129,7 +129,7 @@ githubRouter.post("/github/reimport", async (req, res) => {
   const current = session(req);
   if (!current) { res.status(401).json({ error: "Connect GitHub first" }); return; }
   const repoId = String(req.body?.repoId ?? "");
-  const record = getRepo(repoId);
+  const record = await getRepo(repoId);
   if (!record) { res.status(404).json({ error: "Repository not found" }); return; }
   if (record.origin.kind !== "github" || !record.origin.owner || !record.origin.repo) {
     res.status(400).json({ error: "This repository was not imported from GitHub" });

@@ -53,9 +53,9 @@ export function availableProviders(): ProviderName[] {
 }
 
 /** The user-selected provider+model (settings), else env, else defaults. */
-export function getSelection(): { provider: ProviderName; model: string } {
+export async function getSelection(): Promise<{ provider: ProviderName; model: string }> {
   const avail = availableProviders();
-  const savedProvider = getSetting("ai_provider") as ProviderName | null;
+  const savedProvider = (await getSetting("ai_provider")) as ProviderName | null;
   const envProvider = (process.env.AI_PROVIDER || "").toLowerCase() as ProviderName | "";
   let provider: ProviderName =
     (savedProvider && avail.includes(savedProvider) && savedProvider) ||
@@ -63,26 +63,26 @@ export function getSelection(): { provider: ProviderName; model: string } {
     avail[0] ||
     "openai";
 
-  const savedModel = getSetting(`ai_model_${provider}`);
+  const savedModel = await getSetting(`ai_model_${provider}`);
   const model = savedModel || ENV_MODEL[provider] || DEFAULT_MODELS[provider];
   return { provider, model };
 }
 
-export function setSelection(provider: ProviderName, model: string): void {
-  setSetting("ai_provider", provider);
-  if (model) setSetting(`ai_model_${provider}`, model);
+export async function setSelection(provider: ProviderName, model: string): Promise<void> {
+  await setSetting("ai_provider", provider);
+  if (model) await setSetting(`ai_model_${provider}`, model);
 }
 
-function modelFor(provider: ProviderName): string {
-  const sel = getSelection();
+async function modelFor(provider: ProviderName): Promise<string> {
+  const sel = await getSelection();
   if (sel.provider === provider) return sel.model;
-  return getSetting(`ai_model_${provider}`) || ENV_MODEL[provider] || DEFAULT_MODELS[provider];
+  return (await getSetting(`ai_model_${provider}`)) || ENV_MODEL[provider] || DEFAULT_MODELS[provider];
 }
 
 /** Order to try: selected provider first, then the other as fallback. */
-function providerOrder(): ProviderName[] {
+async function providerOrder(): Promise<ProviderName[]> {
   const avail = availableProviders();
-  const sel = getSelection().provider;
+  const sel = (await getSelection()).provider;
   return [sel, ...avail.filter((p) => p !== sel)].filter((p) => avail.includes(p));
 }
 
@@ -96,7 +96,7 @@ async function callOpenAI(o: GenerateOptions): Promise<string> {
     ? { type: "json_object" as const }
     : undefined;
   const completion = await openaiClient.chat.completions.create({
-    model: modelFor("openai"),
+    model: await modelFor("openai"),
     messages: [{ role: "user", content: o.prompt }],
     temperature: o.temperature ?? 0.2,
     max_tokens: o.maxTokens ?? 1000,
@@ -111,7 +111,7 @@ async function callDeepSeek(o: GenerateOptions): Promise<string> {
   if (!deepseekClient) deepseekClient = new OpenAI({ apiKey: key, baseURL: "https://api.deepseek.com" });
   // DeepSeek is OpenAI-compatible but supports only json_object (no json_schema).
   const completion = await deepseekClient.chat.completions.create({
-    model: modelFor("deepseek"),
+    model: await modelFor("deepseek"),
     messages: [{ role: "user", content: o.prompt }],
     temperature: o.temperature ?? 0.2,
     max_tokens: o.maxTokens ?? 1000,
@@ -123,7 +123,7 @@ async function callDeepSeek(o: GenerateOptions): Promise<string> {
 async function callGemini(o: GenerateOptions): Promise<string> {
   const key = geminiKey();
   if (!key) throw new Error("GEMINI_API_KEY not set");
-  const model = modelFor("gemini");
+  const model = await modelFor("gemini");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const wantJson = o.json || Boolean(o.schema);
   const baseConfig: Record<string, unknown> = {
@@ -171,7 +171,7 @@ async function callGemini(o: GenerateOptions): Promise<string> {
 }
 
 export async function generate(o: GenerateOptions): Promise<{ text: string; provider: ProviderName; model: string }> {
-  const order = providerOrder();
+  const order = await providerOrder();
   if (order.length === 0) {
     throw new Error("No AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY in backend/.env.");
   }
@@ -179,11 +179,12 @@ export async function generate(o: GenerateOptions): Promise<{ text: string; prov
   for (const provider of order) {
     try {
       const text = provider === "openai" ? await callOpenAI(o) : provider === "deepseek" ? await callDeepSeek(o) : await callGemini(o);
-      return { text, provider, model: modelFor(provider) };
+      return { text, provider, model: await modelFor(provider) };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[ai] ${provider}/${modelFor(provider)} failed: ${msg}`);
-      errors.push(`${provider} (${modelFor(provider)}): ${msg}`);
+      const model = await modelFor(provider);
+      console.warn(`[ai] ${provider}/${model} failed: ${msg}`);
+      errors.push(`${provider} (${model}): ${msg}`);
     }
   }
   // Surface the selected provider's failure first — it's the one the user chose.

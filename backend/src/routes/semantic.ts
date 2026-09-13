@@ -7,34 +7,42 @@ import { computeStack } from "../graph/stack.js";
 export const semanticRouter = Router();
 
 /** Deterministic clustering of files that import/call each other, tests, docs, config. */
-function withSubgroups(repoId: string, tree: SemanticTree): SemanticTree {
-  return addSubgroups(tree, buildFileAdjacency(getAllNodes(repoId), getAllEdges(repoId)));
+async function withSubgroups(repoId: string, tree: SemanticTree): Promise<SemanticTree> {
+  return addSubgroups(tree, buildFileAdjacency(await getAllNodes(repoId), await getAllEdges(repoId)));
 }
 
-semanticRouter.get("/repos/:id/stack", (req, res) => {
-  const repo = getRepo(req.params.id);
-  if (!repo) {
-    res.status(404).json({ error: "Repository not found" });
-    return;
+semanticRouter.get("/repos/:id/stack", async (req, res) => {
+  try {
+    const repo = await getRepo(req.params.id);
+    if (!repo) {
+      res.status(404).json({ error: "Repository not found" });
+      return;
+    }
+    res.json(await computeStack(repo.id));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to compute tech stack" });
   }
-  res.json(computeStack(repo.id));
 });
 
 /** Returns the stored semantic tree, building a deterministic one on the fly if absent. */
-semanticRouter.get("/repos/:id/semantic", (req, res) => {
-  const repo = getRepo(req.params.id);
-  if (!repo) {
-    res.status(404).json({ error: "Repository not found" });
-    return;
+semanticRouter.get("/repos/:id/semantic", async (req, res) => {
+  try {
+    const repo = await getRepo(req.params.id);
+    if (!repo) {
+      res.status(404).json({ error: "Repository not found" });
+      return;
+    }
+    const stored = await getSemanticTree(repo.id);
+    if (stored) {
+      res.json({ ...stored.tree, aiEnriched: stored.enriched });
+      return;
+    }
+    const tree = await withSubgroups(repo.id, buildSemanticTree(repo.name, await getAllNodes(repo.id)));
+    await saveSemanticTree(repo.id, tree, false);
+    res.json(tree);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load semantic map" });
   }
-  const stored = getSemanticTree(repo.id);
-  if (stored) {
-    res.json({ ...stored.tree, aiEnriched: stored.enriched });
-    return;
-  }
-  const tree = withSubgroups(repo.id, buildSemanticTree(repo.name, getAllNodes(repo.id)));
-  saveSemanticTree(repo.id, tree, false);
-  res.json(tree);
 });
 
 /**
@@ -43,31 +51,35 @@ semanticRouter.get("/repos/:id/semantic", (req, res) => {
  * if enrichment fails so the client always gets a usable map.
  */
 semanticRouter.post("/repos/:id/decompose", async (req, res) => {
-  const repo = getRepo(req.params.id);
-  if (!repo) {
-    res.status(404).json({ error: "Repository not found" });
-    return;
-  }
-  if (repo.status !== "ready") {
-    res.status(409).json({ error: `Repository is ${repo.status}`, status: repo.status });
-    return;
-  }
-
-  let tree: SemanticTree = buildSemanticTree(repo.name, getAllNodes(repo.id));
-  const wantEnrich = req.query.enrich !== "false";
-
-  if (wantEnrich) {
-    try {
-      tree = await enrichSemanticTree(repo.name, tree);
-    } catch (err) {
-      const grouped = withSubgroups(repo.id, tree);
-      saveSemanticTree(repo.id, grouped, false);
-      res.status(200).json({ ...grouped, aiEnriched: false, enrichmentError: err instanceof Error ? err.message : "AI enrichment failed" });
+  try {
+    const repo = await getRepo(req.params.id);
+    if (!repo) {
+      res.status(404).json({ error: "Repository not found" });
       return;
     }
-  }
+    if (repo.status !== "ready") {
+      res.status(409).json({ error: `Repository is ${repo.status}`, status: repo.status });
+      return;
+    }
 
-  tree = withSubgroups(repo.id, tree);
-  saveSemanticTree(repo.id, tree, tree.aiEnriched);
-  res.json(tree);
+    let tree: SemanticTree = buildSemanticTree(repo.name, await getAllNodes(repo.id));
+    const wantEnrich = req.query.enrich !== "false";
+
+    if (wantEnrich) {
+      try {
+        tree = await enrichSemanticTree(repo.name, tree);
+      } catch (err) {
+        const grouped = await withSubgroups(repo.id, tree);
+        await saveSemanticTree(repo.id, grouped, false);
+        res.status(200).json({ ...grouped, aiEnriched: false, enrichmentError: err instanceof Error ? err.message : "AI enrichment failed" });
+        return;
+      }
+    }
+
+    tree = await withSubgroups(repo.id, tree);
+    await saveSemanticTree(repo.id, tree, tree.aiEnriched);
+    res.json(tree);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to decompose repository" });
+  }
 });

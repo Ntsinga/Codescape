@@ -1,6 +1,8 @@
 import type { ArchitectureResult, DiagramResult, ExplainResult, GitHubRepo, GraphEdge, GraphNode, ImpactResult, RepoSummary, RiskResult, SemanticTree, StackResult } from "./types";
 
-const BASE = "/api";
+// In production this points at the deployed backend (set at build time); in dev
+// it stays "/api" and Vite's proxy (vite.config.ts) forwards it to localhost:4000.
+const BASE = `${import.meta.env.VITE_API_BASE ?? ""}/api`;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init);

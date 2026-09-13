@@ -1,26 +1,46 @@
-import Database from "better-sqlite3";
-import { dbPath, ensureDataDirs } from "../storage/paths.js";
+import pg from "pg";
 
-let db: Database.Database | null = null;
+const { Pool } = pg;
 
-export function getDb(): Database.Database {
-  if (db) return db;
-  ensureDataDirs();
-  db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  migrate(db);
-  return db;
+let pool: pg.Pool | null = null;
+let migrated: Promise<void> | null = null;
+
+export function getPool(): pg.Pool {
+  if (pool) return pool;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is not set. Add a Postgres connection string (e.g. from Neon) to backend/.env.");
+  }
+  pool = new Pool({
+    connectionString,
+    // Neon (and most managed Postgres) require TLS; their cert chain isn't always
+    // in Node's default trust store, so relax verification rather than fail closed.
+    ssl: { rejectUnauthorized: false },
+  });
+  return pool;
 }
 
-function migrate(database: Database.Database): void {
-  database.exec(`
+/** Runs migrations once per process; safe to call repeatedly (subsequent calls await the same promise). */
+export function ensureMigrated(): Promise<void> {
+  if (!migrated) migrated = migrate();
+  return migrated;
+}
+
+async function migrate(): Promise<void> {
+  const db = getPool();
+  await db.query(`
     CREATE TABLE IF NOT EXISTS repos (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       created_at TEXT NOT NULL,
       status TEXT NOT NULL,
-      error TEXT
+      error TEXT,
+      semantic_json TEXT,
+      semantic_enriched BOOLEAN NOT NULL DEFAULT FALSE,
+      origin_kind TEXT,
+      origin_owner TEXT,
+      origin_repo TEXT,
+      origin_branch TEXT
     );
 
     CREATE TABLE IF NOT EXISTS files (
@@ -30,6 +50,13 @@ function migrate(database: Database.Database): void {
       language TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_files_repo ON files(repo_id);
+
+    CREATE TABLE IF NOT EXISTS file_contents (
+      repo_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      PRIMARY KEY (repo_id, path)
+    );
 
     CREATE TABLE IF NOT EXISTS nodes (
       id TEXT PRIMARY KEY,
@@ -66,23 +93,4 @@ function migrate(database: Database.Database): void {
       value TEXT
     );
   `);
-
-  // Additive migration: semantic (logical) decomposition stored as a JSON blob
-  // per repo. Guarded so re-running against an existing DB is a no-op.
-  const cols = database.prepare(`PRAGMA table_info(repos)`).all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === "semantic_json")) {
-    database.exec(`ALTER TABLE repos ADD COLUMN semantic_json TEXT`);
-  }
-  if (!cols.some((c) => c.name === "semantic_enriched")) {
-    database.exec(`ALTER TABLE repos ADD COLUMN semantic_enriched INTEGER NOT NULL DEFAULT 0`);
-  }
-  // Origin tracking, so a repo can be re-imported in place.
-  for (const [col, ddl] of [
-    ["origin_kind", `ALTER TABLE repos ADD COLUMN origin_kind TEXT`],
-    ["origin_owner", `ALTER TABLE repos ADD COLUMN origin_owner TEXT`],
-    ["origin_repo", `ALTER TABLE repos ADD COLUMN origin_repo TEXT`],
-    ["origin_branch", `ALTER TABLE repos ADD COLUMN origin_branch TEXT`],
-  ] as const) {
-    if (!cols.some((c) => c.name === col)) database.exec(ddl);
-  }
 }

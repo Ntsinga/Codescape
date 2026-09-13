@@ -46,6 +46,10 @@ const SECRET_LIKE_NAMES = [
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per source file
 const MAX_TOTAL_BYTES = 300 * 1024 * 1024; // 300MB per repo, uncompressed
 const MAX_FILE_COUNT = 50_000;
+// File content is persisted in Postgres (for the source viewer/AI, since Render's
+// free tier has no persistent disk) — capped well under Neon's free storage tier
+// so a handful of imported repos don't exhaust it.
+const MAX_STORED_CONTENT_BYTES = 50 * 1024 * 1024; // 50MB of source text per repo
 
 export function isIgnoredDir(dirName: string): boolean {
   return IGNORED_DIR_NAMES.has(dirName) || dirName.startsWith(".");
@@ -66,4 +70,4 @@ export function isSecretLike(relativePath: string): boolean {
   return SECRET_LIKE_NAMES.some((re) => re.test(baseName));
 }
 
-export const limits = { MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_FILE_COUNT };
+export const limits = { MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_FILE_COUNT, MAX_STORED_CONTENT_BYTES };

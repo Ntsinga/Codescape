@@ -1,12 +1,11 @@
 import { Router } from "express";
-import { getRepo } from "../graph/queries.js";
-import { getAllNodes, getAllEdges, getNode, getChildren, getEdgesForNode, searchNodes, getImpact } from "../graph/queries.js";
+import { getRepo, getAllNodes, getAllEdges, getNode, getChildren, getEdgesForNode, searchNodes, getImpact } from "../graph/queries.js";
 import type { EdgeType } from "../graph/types.js";
 
 export const graphRouter = Router();
 
-function requireReadyRepo(repoId: string, res: import("express").Response): boolean {
-  const repo = getRepo(repoId);
+async function requireReadyRepo(repoId: string, res: import("express").Response): Promise<boolean> {
+  const repo = await getRepo(repoId);
   if (!repo) {
     res.status(404).json({ error: "Repository not found" });
     return false;
@@ -18,45 +17,65 @@ function requireReadyRepo(repoId: string, res: import("express").Response): bool
   return true;
 }
 
-graphRouter.get("/repos/:id/graph", (req, res) => {
-  if (!requireReadyRepo(req.params.id, res)) return;
-  res.json({ nodes: getAllNodes(req.params.id), edges: getAllEdges(req.params.id) });
-});
-
-graphRouter.get("/repos/:id/nodes/:nodeId", (req, res) => {
-  if (!requireReadyRepo(req.params.id, res)) return;
-  const node = getNode(req.params.nodeId);
-  if (!node || node.repoId !== req.params.id) {
-    res.status(404).json({ error: "Node not found" });
-    return;
+graphRouter.get("/repos/:id/graph", async (req, res) => {
+  try {
+    if (!(await requireReadyRepo(req.params.id, res))) return;
+    res.json({ nodes: await getAllNodes(req.params.id), edges: await getAllEdges(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load graph" });
   }
-  const children = getChildren(node.id, req.params.id);
-  const edgeType = req.query.edgeType as EdgeType | undefined;
-  const { incoming, outgoing } = getEdgesForNode(node.id, edgeType);
-  res.json({ node, children, incoming, outgoing });
 });
 
-graphRouter.get("/repos/:id/nodes/:nodeId/children", (req, res) => {
-  if (!requireReadyRepo(req.params.id, res)) return;
-  res.json(getChildren(req.params.nodeId, req.params.id));
-});
-
-graphRouter.get("/repos/:id/search", (req, res) => {
-  if (!requireReadyRepo(req.params.id, res)) return;
-  const q = (req.query.q as string | undefined)?.trim();
-  if (!q) {
-    res.json([]);
-    return;
+graphRouter.get("/repos/:id/nodes/:nodeId", async (req, res) => {
+  try {
+    if (!(await requireReadyRepo(req.params.id, res))) return;
+    const node = await getNode(req.params.nodeId);
+    if (!node || node.repoId !== req.params.id) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+    const children = await getChildren(node.id, req.params.id);
+    const edgeType = req.query.edgeType as EdgeType | undefined;
+    const { incoming, outgoing } = await getEdgesForNode(node.id, edgeType);
+    res.json({ node, children, incoming, outgoing });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load node" });
   }
-  res.json(searchNodes(req.params.id, q));
 });
 
-graphRouter.get("/repos/:id/nodes/:nodeId/impact", (req, res) => {
-  if (!requireReadyRepo(req.params.id, res)) return;
-  const node = getNode(req.params.nodeId);
-  if (!node || node.repoId !== req.params.id) {
-    res.status(404).json({ error: "Node not found" });
-    return;
+graphRouter.get("/repos/:id/nodes/:nodeId/children", async (req, res) => {
+  try {
+    if (!(await requireReadyRepo(req.params.id, res))) return;
+    res.json(await getChildren(req.params.nodeId, req.params.id));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load children" });
   }
-  res.json({ node, impacted: getImpact(node.id, req.params.id) });
+});
+
+graphRouter.get("/repos/:id/search", async (req, res) => {
+  try {
+    if (!(await requireReadyRepo(req.params.id, res))) return;
+    const q = (req.query.q as string | undefined)?.trim();
+    if (!q) {
+      res.json([]);
+      return;
+    }
+    res.json(await searchNodes(req.params.id, q));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Search failed" });
+  }
+});
+
+graphRouter.get("/repos/:id/nodes/:nodeId/impact", async (req, res) => {
+  try {
+    if (!(await requireReadyRepo(req.params.id, res))) return;
+    const node = await getNode(req.params.nodeId);
+    if (!node || node.repoId !== req.params.id) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+    res.json({ node, impacted: await getImpact(node.id, req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to compute impact" });
+  }
 });

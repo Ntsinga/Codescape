@@ -112,7 +112,7 @@ export function UploadView() {
         like an atlas that goes from continents to streets.
       </p>
       <p style={{ color: "var(--text-dim)" }}>Or connect a GitHub repository</p>
-      <a href="/api/github/connect"><button type="button">Connect GitHub</button></a>
+      <a href={`${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`}><button type="button">Connect GitHub</button></a>
       <div
         className={`dropzone${dragOver ? " dragover" : ""}`}
         onDragOver={(e) => {

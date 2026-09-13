@@ -3,11 +3,23 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import { extractZip } from "./extractZip.js";
 import { detectLanguageByExtension } from "./detectLanguage.js";
+import { isSecretLike, limits } from "./ignoreRules.js";
 import { repoSourceDir, repoStorageDir } from "../storage/paths.js";
 import { parseFile } from "../parsing/parseFile.js";
 import { buildGraph, type FileInput } from "../graph/buildGraph.js";
 import { buildSemanticTree, addSubgroups, buildFileAdjacency } from "../graph/semantic.js";
-import { insertRepo, insertFile, insertNodesBatch, insertEdgesBatch, updateRepoStatus, saveSemanticTree, setRepoOrigin, clearRepoGraph, type RepoOrigin } from "../graph/queries.js";
+import {
+  insertRepo,
+  insertFilesBatch,
+  insertFileContentsBatch,
+  insertNodesBatch,
+  insertEdgesBatch,
+  updateRepoStatus,
+  saveSemanticTree,
+  setRepoOrigin,
+  clearRepoGraph,
+  type RepoOrigin,
+} from "../graph/queries.js";
 import type { ParsedFile } from "../graph/types.js";
 
 export interface ProcessResult {
@@ -59,22 +71,33 @@ async function stripCommonPrefix<T extends { relativePath: string; absolutePath:
  * Runs the full deterministic pipeline for one uploaded zip: secure extraction,
  * language detection, tree-sitter parsing, and common-graph construction —
  * matching the "deterministic analysis first" principle from the product spec.
+ *
+ * All durable output (graph, semantic tree, and file contents for the source
+ * viewer/AI) is written to Postgres. The local extraction directory is scratch
+ * space only and is deleted once processing finishes, since the deployed
+ * environment's disk is not persistent.
  */
 export async function processRepoZip(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
   const isReplace = Boolean(options.repoId);
   const repoId = options.repoId ?? nanoid(12);
 
   if (isReplace) {
-    updateRepoStatus(repoId, "processing");
-    clearRepoGraph(repoId);
-    await fs.rm(repoStorageDir(repoId), { recursive: true, force: true }).catch(() => undefined);
+    await updateRepoStatus(repoId, "processing");
+    await clearRepoGraph(repoId);
   } else {
-    insertRepo({ id: repoId, name: displayName, createdAt: new Date().toISOString(), status: "processing", error: null, origin: { kind: null, owner: null, repo: null, branch: null } });
+    await insertRepo({
+      id: repoId,
+      name: displayName,
+      createdAt: new Date().toISOString(),
+      status: "processing",
+      error: null,
+      origin: { kind: null, owner: null, repo: null, branch: null },
+    });
   }
-  if (options.origin) setRepoOrigin(repoId, options.origin);
+  if (options.origin) await setRepoOrigin(repoId, options.origin);
 
+  const destDir = repoSourceDir(repoId);
   try {
-    const destDir = repoSourceDir(repoId);
     await fs.mkdir(destDir, { recursive: true });
     const extractedRaw = await extractZip(zipPath, destDir);
     // GitHub/GitLab zipballs wrap everything in a single top-level folder
@@ -82,37 +105,54 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
     const extracted = await stripCommonPrefix(extractedRaw, destDir);
 
     const fileInputs: FileInput[] = [];
+    const fileRecords: Array<{ id: string; repoId: string; path: string; language: string | null }> = [];
+    const contentsToStore: Array<{ path: string; content: string }> = [];
     const parsedByPath = new Map<string, ParsedFile>();
+    let storedBytes = 0;
 
     for (const file of extracted) {
       const language = detectLanguageByExtension(file.relativePath);
       fileInputs.push({ relativePath: file.relativePath, language });
-      insertFile(nanoid(10), repoId, file.relativePath, language === "unknown" ? null : language);
+      fileRecords.push({ id: nanoid(10), repoId, path: file.relativePath, language: language === "unknown" ? null : language });
 
-      if (language === "unknown") continue;
       const sourceText = await fs.readFile(file.absolutePath, "utf-8").catch(() => null);
       if (sourceText === null) continue;
+
+      // Persist content for the source viewer / AI explain, skipping secrets and
+      // stopping once we hit the per-repo storage cap (Neon free tier is limited).
+      if (!isSecretLike(file.relativePath) && storedBytes < limits.MAX_STORED_CONTENT_BYTES) {
+        contentsToStore.push({ path: file.relativePath, content: sourceText });
+        storedBytes += Buffer.byteLength(sourceText, "utf-8");
+      }
+
+      if (language === "unknown") continue;
       const parsed = await parseFile(file.relativePath, language, sourceText);
       if (parsed) parsedByPath.set(file.relativePath, parsed);
     }
 
+    await insertFilesBatch(fileRecords);
+    await insertFileContentsBatch(repoId, contentsToStore);
+
     const { nodes, edges } = buildGraph(repoId, displayName, fileInputs, parsedByPath);
-    insertNodesBatch(nodes);
-    insertEdgesBatch(edges);
+    await insertNodesBatch(nodes);
+    await insertEdgesBatch(edges);
 
     // Deterministic semantic decomposition, stored immediately (no API key / latency
     // cost). AI enrichment of names/summaries happens on demand via /decompose.
     const semanticTree = addSubgroups(buildSemanticTree(displayName, nodes), buildFileAdjacency(nodes, edges));
-    saveSemanticTree(repoId, semanticTree, false);
+    await saveSemanticTree(repoId, semanticTree, false);
 
-    updateRepoStatus(repoId, "ready");
+    await updateRepoStatus(repoId, "ready");
 
     const symbolCount = nodes.filter((n) => n.type === "Class" || n.type === "Interface" || n.type === "Function").length;
     return { repoId, fileCount: extracted.length, symbolCount };
   } catch (err) {
-    updateRepoStatus(repoId, "failed", err instanceof Error ? err.message : String(err));
+    await updateRepoStatus(repoId, "failed", err instanceof Error ? err.message : String(err));
     throw err;
   } finally {
     await fs.unlink(zipPath).catch(() => undefined);
+    // Postgres now holds everything needed to serve this repo; the local copy was
+    // only ever scratch space for extraction + parsing.
+    await fs.rm(repoStorageDir(repoId), { recursive: true, force: true }).catch(() => undefined);
   }
 }
