@@ -125,6 +125,17 @@ a { color: var(--accent); }
 .ghost-btn:hover { border-color: var(--accent); }
 .ghost-btn.sm { padding: 3px 8px; font-size: 11px; }
 
+.model-picker {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  max-width: 180px;
+}
+.model-picker:hover { border-color: var(--accent); }
+
 .ai-pill {
   font-size: 11px;
   color: var(--accent);

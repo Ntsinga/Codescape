@@ -60,6 +60,11 @@ function migrate(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_edges_repo ON edges(repo_id);
     CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_node_id);
     CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_node_id);
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
 
   // Additive migration: semantic (logical) decomposition stored as a JSON blob

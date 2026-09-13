@@ -57,6 +57,16 @@ export function analyzeRepository(repoId: string): Promise<ArchitectureResult> {
   return request(`/repos/${repoId}/analyze`, { method: "POST" });
 }
 
+export interface AiModels {
+  providers: Array<"openai" | "gemini">;
+  models: { openai: string[]; gemini: string[] };
+  current: { provider: "openai" | "gemini"; model: string };
+}
+export function getAiModels(): Promise<AiModels> { return request(`/ai/models`); }
+export function selectAiModel(provider: "openai" | "gemini", model: string): Promise<{ current: { provider: string; model: string } }> {
+  return request(`/ai/select`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, model }) });
+}
+
 export function getSemantic(repoId: string): Promise<SemanticTree> { return request(`/repos/${repoId}/semantic`); }
 export function getStack(repoId: string): Promise<StackResult> { return request(`/repos/${repoId}/stack`); }
 export function decomposeRepository(repoId: string, enrich = true): Promise<SemanticTree> {

@@ -33,7 +33,10 @@ export function UploadView() {
     refreshRepos();
     const params = new URLSearchParams(window.location.search);
     const connection = params.get("connection");
-    if (params.get("github") === "connected" && connection) {
+    if (params.get("github") === "error") {
+      setError(params.get("message") || "GitHub connection failed.");
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (params.get("github") === "connected" && connection) {
       setGithubConnection(connection);
       setGithubLoading(true);
       listGitHubRepos(connection).then(setGithubRepos).catch((err) => setError(err instanceof Error ? err.message : "Unable to list GitHub repositories")).finally(() => setGithubLoading(false));

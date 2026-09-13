@@ -1,10 +1,11 @@
 import OpenAI from "openai";
+import { getSetting, setSetting } from "../graph/queries.js";
 
 /**
- * Provider-agnostic text/JSON generation. Supports OpenAI and Google Gemini.
- * Selection: AI_PROVIDER env ("openai" | "gemini") picks the preferred one;
- * otherwise whichever key is present. The other provider (if its key exists) is
- * used as an automatic fallback — so an OpenAI 429 transparently retries on Gemini.
+ * Provider-agnostic text/JSON generation across OpenAI and Google Gemini.
+ * The active provider + model are chosen at runtime (persisted in settings, and
+ * changeable from the UI), falling back to env defaults. If the selected provider
+ * fails (e.g. a 503/429), generation automatically retries on the other provider.
  */
 export type ProviderName = "openai" | "gemini";
 
@@ -15,8 +16,18 @@ export interface GenerateOptions {
   temperature?: number;
 }
 
-let openaiClient: OpenAI | null = null;
+const DEFAULT_MODELS: Record<ProviderName, string> = {
+  openai: "gpt-4o-mini",
+  gemini: "gemini-2.5-flash",
+};
 
+// Used only when the live model list can't be fetched.
+const FALLBACK_MODELS: Record<ProviderName, string[]> = {
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest"],
+};
+
+let openaiClient: OpenAI | null = null;
 const openaiKey = () => process.env.OPENAI_API_KEY;
 const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
@@ -27,14 +38,39 @@ export function availableProviders(): ProviderName[] {
   return list;
 }
 
-/** Ordered list to try: explicit AI_PROVIDER first (if keyed), then the rest as fallback. */
-export function preferredOrder(): ProviderName[] {
+/** The user-selected provider+model (settings), else env, else defaults. */
+export function getSelection(): { provider: ProviderName; model: string } {
   const avail = availableProviders();
-  const explicit = (process.env.AI_PROVIDER || "").toLowerCase();
-  if ((explicit === "openai" || explicit === "gemini") && avail.includes(explicit as ProviderName)) {
-    return [explicit as ProviderName, ...avail.filter((p) => p !== explicit)];
-  }
-  return avail;
+  const savedProvider = getSetting("ai_provider") as ProviderName | null;
+  const envProvider = (process.env.AI_PROVIDER || "").toLowerCase() as ProviderName | "";
+  let provider: ProviderName =
+    (savedProvider && avail.includes(savedProvider) && savedProvider) ||
+    (envProvider && avail.includes(envProvider as ProviderName) && (envProvider as ProviderName)) ||
+    avail[0] ||
+    "openai";
+
+  const savedModel = getSetting(`ai_model_${provider}`);
+  const envModel = provider === "openai" ? process.env.OPENAI_MODEL : process.env.GEMINI_MODEL;
+  const model = savedModel || envModel || DEFAULT_MODELS[provider];
+  return { provider, model };
+}
+
+export function setSelection(provider: ProviderName, model: string): void {
+  setSetting("ai_provider", provider);
+  if (model) setSetting(`ai_model_${provider}`, model);
+}
+
+function modelFor(provider: ProviderName): string {
+  const sel = getSelection();
+  if (sel.provider === provider) return sel.model;
+  return (provider === "openai" ? process.env.OPENAI_MODEL : process.env.GEMINI_MODEL) || DEFAULT_MODELS[provider];
+}
+
+/** Order to try: selected provider first, then the other as fallback. */
+function providerOrder(): ProviderName[] {
+  const avail = availableProviders();
+  const sel = getSelection().provider;
+  return [sel, ...avail.filter((p) => p !== sel)].filter((p) => avail.includes(p));
 }
 
 async function callOpenAI(o: GenerateOptions): Promise<string> {
@@ -42,7 +78,7 @@ async function callOpenAI(o: GenerateOptions): Promise<string> {
   if (!key) throw new Error("OPENAI_API_KEY not set");
   if (!openaiClient) openaiClient = new OpenAI({ apiKey: key });
   const completion = await openaiClient.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    model: modelFor("openai"),
     messages: [{ role: "user", content: o.prompt }],
     temperature: o.temperature ?? 0.2,
     max_tokens: o.maxTokens ?? 1000,
@@ -54,7 +90,7 @@ async function callOpenAI(o: GenerateOptions): Promise<string> {
 async function callGemini(o: GenerateOptions): Promise<string> {
   const key = geminiKey();
   if (!key) throw new Error("GEMINI_API_KEY not set");
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const model = modelFor("gemini");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const body = {
     contents: [{ parts: [{ text: o.prompt }] }],
@@ -74,8 +110,8 @@ async function callGemini(o: GenerateOptions): Promise<string> {
   return parts.map((p: any) => p.text ?? "").join("");
 }
 
-export async function generate(o: GenerateOptions): Promise<{ text: string; provider: ProviderName }> {
-  const order = preferredOrder();
+export async function generate(o: GenerateOptions): Promise<{ text: string; provider: ProviderName; model: string }> {
+  const order = providerOrder();
   if (order.length === 0) {
     throw new Error("No AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY in backend/.env.");
   }
@@ -83,10 +119,51 @@ export async function generate(o: GenerateOptions): Promise<{ text: string; prov
   for (const provider of order) {
     try {
       const text = provider === "openai" ? await callOpenAI(o) : await callGemini(o);
-      return { text, provider };
+      return { text, provider, model: modelFor(provider) };
     } catch (err) {
-      lastErr = err; // fall through to the next provider
+      lastErr = err;
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("All configured AI providers failed");
+}
+
+// ---- Live model listing --------------------------------------------------
+
+const OPENAI_CHAT_RE = /^(gpt-|o1|o3|o4|chatgpt)/i;
+const OPENAI_EXCLUDE_RE = /(embedding|whisper|tts|audio|realtime|image|dall-e|moderation|transcribe|search|instruct)/i;
+
+async function listOpenAIModels(): Promise<string[]> {
+  const key = openaiKey();
+  if (!key) return [];
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) return FALLBACK_MODELS.openai;
+    const data = (await res.json()) as any;
+    const ids: string[] = (data?.data ?? []).map((m: any) => m.id).filter((id: string) => OPENAI_CHAT_RE.test(id) && !OPENAI_EXCLUDE_RE.test(id));
+    return ids.length ? ids.sort() : FALLBACK_MODELS.openai;
+  } catch {
+    return FALLBACK_MODELS.openai;
+  }
+}
+
+async function listGeminiModels(): Promise<string[]> {
+  const key = geminiKey();
+  if (!key) return [];
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=200`);
+    if (!res.ok) return FALLBACK_MODELS.gemini;
+    const data = (await res.json()) as any;
+    const ids: string[] = (data?.models ?? [])
+      .filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
+      .map((m: any) => String(m.name).replace(/^models\//, ""))
+      .filter((id: string) => !/embedding|aqa|image|vision|tts|computer-use|deep-research|antigravity|robotics|live|audio/i.test(id));
+    return ids.length ? ids.sort() : FALLBACK_MODELS.gemini;
+  } catch {
+    return FALLBACK_MODELS.gemini;
+  }
+}
+
+export async function listModels(): Promise<{ openai: string[]; gemini: string[] }> {
+  const [openai, gemini] = await Promise.all([listOpenAIModels(), listGeminiModels()]);
+  return { openai, gemini };
 }

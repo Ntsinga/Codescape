@@ -5,13 +5,37 @@ import { getRepo, getNode, getEdgesForNode, getAllNodes, getAllEdges } from "../
 import { repoSourceDir } from "../storage/paths.js";
 import { isSecretLike } from "../ingestion/ignoreRules.js";
 import { explainNode, analyzeArchitecture } from "../ai/openai.js";
-import { availableProviders, preferredOrder } from "../ai/provider.js";
+import { availableProviders, getSelection, setSelection, listModels, type ProviderName } from "../ai/provider.js";
 
 export const aiRouter = Router();
 
 aiRouter.get("/ai/status", (_req, res) => {
   const providers = availableProviders();
-  res.json({ providers, preferred: preferredOrder()[0] ?? null, enabled: providers.length > 0 });
+  res.json({ providers, current: getSelection(), enabled: providers.length > 0 });
+});
+
+aiRouter.get("/ai/models", async (_req, res) => {
+  try {
+    const models = await listModels();
+    res.json({ providers: availableProviders(), models, current: getSelection() });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : "Failed to list models" });
+  }
+});
+
+aiRouter.post("/ai/select", (req, res) => {
+  const provider = String(req.body?.provider ?? "") as ProviderName;
+  const model = String(req.body?.model ?? "");
+  if (provider !== "openai" && provider !== "gemini") {
+    res.status(400).json({ error: "provider must be 'openai' or 'gemini'" });
+    return;
+  }
+  if (!availableProviders().includes(provider)) {
+    res.status(400).json({ error: `${provider} has no API key configured` });
+    return;
+  }
+  setSelection(provider, model);
+  res.json({ current: getSelection() });
 });
 
 async function readSnippet(repoId: string, filePath: string, startLine: number, endLine: number): Promise<string> {

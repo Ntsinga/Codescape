@@ -6,6 +6,7 @@ import { Graph3DScene } from "../components/Graph3DScene";
 import { SourceViewer } from "../components/SourceViewer";
 import { NodeDetailPanel } from "../components/NodeDetailPanel";
 import { LiveDiagram } from "../components/LiveDiagram";
+import { ModelPicker } from "../components/ModelPicker";
 import { useExplorerStore } from "../state/store";
 import { analyzeRepository, decomposeRepository, getRisks, getStack } from "../api/client";
 import type { ArchitectureResult, RiskResult, StackResult } from "../api/types";
@@ -109,6 +110,7 @@ export function ExplorerView() {
           </div>
 
           <SearchBar />
+          <ModelPicker />
           {layer === "semantic" && (
             <button className="ghost-btn" onClick={rebuildMap} disabled={enriching} title="Regenerate the AI capability map">
               {enriching ? "Rebuilding…" : "↻ Rebuild map"}

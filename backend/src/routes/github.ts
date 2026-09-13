@@ -34,20 +34,56 @@ githubRouter.get("/github/connect", (req, res) => {
   } catch (err) { res.status(500).json({ error: err instanceof Error ? err.message : "GitHub OAuth is not configured" }); }
 });
 
+function failToApp(res: import("express").Response, message: string): void {
+  // Always land the user back in the app with a readable message, never a raw error page.
+  res.redirect(`${frontendUrl}/?github=error&message=${encodeURIComponent(message)}`);
+}
+
 githubRouter.get("/github/callback", async (req, res) => {
   const state = String(req.query.state ?? "");
   const record = pending.get(state);
   pending.delete(state);
-  if (!record || Date.now() - record.createdAt > 10 * 60_000) { res.status(400).send("Invalid or expired GitHub OAuth state"); return; }
+  if (!record || Date.now() - record.createdAt > 10 * 60_000) {
+    failToApp(res, "GitHub sign-in expired or was already used. Please click Connect GitHub again.");
+    return;
+  }
+  if (req.query.error) {
+    failToApp(res, `GitHub denied the request: ${String(req.query.error_description ?? req.query.error)}`);
+    return;
+  }
   try {
     const { clientId, clientSecret } = config();
-    const tokenRes = await fetch("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code: req.query.code }) });
-    const token = (await tokenRes.json()) as { access_token?: string; error?: string };
-    if (!token.access_token) throw new Error(token.error ?? "GitHub token exchange failed");
+    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "Codescape" },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code: req.query.code, redirect_uri: process.env.GITHUB_CALLBACK_URL ?? "http://localhost:4000/api/github/callback" }),
+    });
+
+    // GitHub returns JSON when Accept: application/json is honored, but error pages
+    // (bad credentials, rate limiting, GitHub App vs OAuth App mismatch) can be HTML.
+    const raw = await tokenRes.text();
+    let token: { access_token?: string; error?: string; error_description?: string } = {};
+    try {
+      token = JSON.parse(raw);
+    } catch {
+      console.error(`[github] token endpoint returned non-JSON (status ${tokenRes.status}):`, raw.slice(0, 300));
+      failToApp(res, `GitHub token exchange returned an unexpected response (HTTP ${tokenRes.status}). Check that GITHUB_CLIENT_ID/SECRET are for an OAuth App and the callback URL matches.`);
+      return;
+    }
+
+    if (!token.access_token) {
+      console.error("[github] token exchange error:", token);
+      failToApp(res, token.error_description || token.error || "GitHub token exchange failed.");
+      return;
+    }
+
     const connection = crypto.randomBytes(18).toString("hex");
     sessions.set(connection, { token: token.access_token, createdAt: Date.now() });
     res.redirect(`${frontendUrl}/?github=connected&connection=${connection}`);
-  } catch (err) { res.status(502).send(err instanceof Error ? err.message : "GitHub authentication failed"); }
+  } catch (err) {
+    console.error("[github] callback error:", err);
+    failToApp(res, err instanceof Error ? err.message : "GitHub authentication failed");
+  }
 });
 
 function session(req: import("express").Request) { return sessions.get(String(req.query.connection ?? req.headers["x-github-connection"] ?? "")); }
