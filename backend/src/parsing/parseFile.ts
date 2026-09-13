@@ -76,6 +76,18 @@ export async function parseFile(relativePath: string, language: Language, source
 
   const parser = await getParser(key);
   const tree = parser.parse(sourceText);
+  try {
+    // `await` here is essential: the finally must not delete the tree until the
+    // async extraction has finished reading its nodes.
+    return await extractFromTree(key, language, relativePath, tree);
+  } finally {
+    // web-tree-sitter trees hold WASM memory the JS GC can't reclaim — without
+    // this, every parsed file leaks its whole syntax tree and large repos OOM.
+    tree.delete();
+  }
+}
+
+async function extractFromTree(key: GrammarKey, language: Language, relativePath: string, tree: Parser.Tree): Promise<ParsedFile> {
   const root = tree.rootNode;
 
   const defQuery = await cachedQuery(key, "def", DEFINITION_QUERIES[key]);
