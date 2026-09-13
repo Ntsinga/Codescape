@@ -201,13 +201,19 @@ function ImportedModuleArtifact({ selected, hovered }: ArtifactProps) {
 }
 
 function ConceptArtifact({ selected, hovered }: ArtifactProps) {
-  // Hexagonal "district" prism — a capability region you enter.
-  const emissive = selected ? 0.7 : hovered ? 0.35 : 0.14;
+  // Soft rounded "module" cube — a capability container you enter.
+  const emissive = selected ? 0.75 : hovered ? 0.4 : 0.18;
   return (
-    <mesh castShadow rotation={[0, Math.PI / 6, 0]}>
-      <cylinderGeometry args={[0.95, 1.05, 0.7, 6]} />
-      <meshStandardMaterial color={TYPE_TINT.Concept} metalness={0.35} roughness={0.4} emissive={TYPE_TINT.Concept} emissiveIntensity={emissive} />
-    </mesh>
+    <group>
+      <RoundedBox args={[1.25, 1.25, 1.25]} radius={0.22} smoothness={5} castShadow>
+        <meshStandardMaterial color={TYPE_TINT.Concept} metalness={0.5} roughness={0.28} emissive={TYPE_TINT.Concept} emissiveIntensity={emissive} />
+      </RoundedBox>
+      {/* faint glow shell so it reads as an enterable region */}
+      <mesh scale={1.18}>
+        <boxGeometry args={[1.25, 1.25, 1.25]} />
+        <meshBasicMaterial color={TYPE_TINT.Concept} transparent opacity={hovered || selected ? 0.14 : 0.06} />
+      </mesh>
+    </group>
   );
 }
 
