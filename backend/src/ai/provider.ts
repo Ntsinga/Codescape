@@ -18,13 +18,13 @@ export interface GenerateOptions {
 
 const DEFAULT_MODELS: Record<ProviderName, string> = {
   openai: "gpt-4o-mini",
-  gemini: "gemini-2.5-flash",
+  gemini: "gemini-3.6-flash",
 };
 
 // Used only when the live model list can't be fetched.
 const FALLBACK_MODELS: Record<ProviderName, string[]> = {
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
-  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-flash-latest"],
+  gemini: ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
 };
 
 let openaiClient: OpenAI | null = null;
@@ -115,16 +115,19 @@ export async function generate(o: GenerateOptions): Promise<{ text: string; prov
   if (order.length === 0) {
     throw new Error("No AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY in backend/.env.");
   }
-  let lastErr: unknown;
+  const errors: string[] = [];
   for (const provider of order) {
     try {
       const text = provider === "openai" ? await callOpenAI(o) : await callGemini(o);
       return { text, provider, model: modelFor(provider) };
     } catch (err) {
-      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ai] ${provider}/${modelFor(provider)} failed: ${msg}`);
+      errors.push(`${provider} (${modelFor(provider)}): ${msg}`);
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error("All configured AI providers failed");
+  // Surface the selected provider's failure first — it's the one the user chose.
+  throw new Error(errors.join(" | "));
 }
 
 // ---- Live model listing --------------------------------------------------
