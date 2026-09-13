@@ -14,6 +14,9 @@ export interface GenerateOptions {
   json?: boolean;
   maxTokens?: number;
   temperature?: number;
+  /** Optional JSON schema (Gemini responseSchema / OpenAI json_schema) to force output shape. */
+  schema?: Record<string, unknown>;
+  schemaName?: string;
 }
 
 const DEFAULT_MODELS: Record<ProviderName, string> = {
@@ -77,12 +80,17 @@ async function callOpenAI(o: GenerateOptions): Promise<string> {
   const key = openaiKey();
   if (!key) throw new Error("OPENAI_API_KEY not set");
   if (!openaiClient) openaiClient = new OpenAI({ apiKey: key });
+  const responseFormat = o.schema
+    ? { type: "json_schema" as const, json_schema: { name: o.schemaName ?? "response", schema: o.schema, strict: false } }
+    : o.json
+    ? { type: "json_object" as const }
+    : undefined;
   const completion = await openaiClient.chat.completions.create({
     model: modelFor("openai"),
     messages: [{ role: "user", content: o.prompt }],
     temperature: o.temperature ?? 0.2,
     max_tokens: o.maxTokens ?? 1000,
-    ...(o.json ? { response_format: { type: "json_object" as const } } : {}),
+    ...(responseFormat ? { response_format: responseFormat } : {}),
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -92,22 +100,49 @@ async function callGemini(o: GenerateOptions): Promise<string> {
   if (!key) throw new Error("GEMINI_API_KEY not set");
   const model = modelFor("gemini");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-  const body = {
-    contents: [{ parts: [{ text: o.prompt }] }],
-    generationConfig: {
-      temperature: o.temperature ?? 0.2,
-      maxOutputTokens: o.maxTokens ?? 1000,
-      ...(o.json ? { responseMimeType: "application/json" } : {}),
-    },
+  const wantJson = o.json || Boolean(o.schema);
+  const baseConfig: Record<string, unknown> = {
+    temperature: o.temperature ?? 0.2,
+    maxOutputTokens: o.maxTokens ?? 1000,
+    ...(wantJson ? { responseMimeType: "application/json" } : {}),
+    ...(o.schema ? { responseSchema: o.schema } : {}),
   };
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  async function call(withThinkingDisabled: boolean) {
+    // Gemini 2.5/3.x flash models spend output tokens on internal "thinking",
+    // which can consume the whole budget and truncate the answer to "{". Disable it
+    // so the token budget goes to the actual JSON.
+    const generationConfig = withThinkingDisabled ? { ...baseConfig, thinkingConfig: { thinkingBudget: 0 } } : baseConfig;
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: o.prompt }] }], generationConfig }),
+    });
+  }
+
+  let res = await call(true);
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Gemini API error ${res.status}: ${detail.slice(0, 200)}`);
+    // A model that rejects thinkingConfig (400) → retry once without it.
+    if (res.status === 400 && /thinking/i.test(detail)) {
+      res = await call(false);
+      if (!res.ok) {
+        const d2 = await res.text().catch(() => "");
+        throw new Error(`Gemini API error ${res.status}: ${d2.slice(0, 200)}`);
+      }
+    } else {
+      throw new Error(`Gemini API error ${res.status}: ${detail.slice(0, 200)}`);
+    }
   }
   const data = (await res.json()) as any;
-  const parts = data?.candidates?.[0]?.content?.parts ?? [];
-  return parts.map((p: any) => p.text ?? "").join("");
+  const candidate = data?.candidates?.[0];
+  const parts = candidate?.content?.parts ?? [];
+  const text = parts.map((p: any) => p.text ?? "").join("");
+  // Surface truncation/blocking so it isn't silently parsed as empty.
+  if (!text && candidate?.finishReason && candidate.finishReason !== "STOP") {
+    throw new Error(`Gemini returned no text (finishReason=${candidate.finishReason})`);
+  }
+  return text;
 }
 
 export async function generate(o: GenerateOptions): Promise<{ text: string; provider: ProviderName; model: string }> {

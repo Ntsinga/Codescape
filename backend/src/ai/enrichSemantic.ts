@@ -34,19 +34,38 @@ ${samplePaths.join("\n")}
 
 Propose 4-8 high-level CONCEPTS (capabilities / domains / responsibility areas) that best describe THIS codebase — you choose the vocabulary (e.g. "Authentication", "Financial Tracking", "AI Orchestration", "Data Layer", "Mobile UI"). Also write a 2-3 sentence plain-language overview of what the system does.
 
-Return JSON only:
-{"overview":"...","concepts":[{"name":"2-4 words","kind":"Capability|Domain|Service|Subsystem|Layer","summary":"one sentence","capability":"short tag or null"}]}`;
+Return the overview and a list of concepts.`;
+
+  const conceptItemSchema = {
+    type: "OBJECT",
+    properties: {
+      name: { type: "STRING" },
+      kind: { type: "STRING" },
+      summary: { type: "STRING" },
+      capability: { type: "STRING" },
+    },
+    required: ["name"],
+  };
+  const passASchema = {
+    type: "OBJECT",
+    properties: {
+      overview: { type: "STRING" },
+      concepts: { type: "ARRAY", items: conceptItemSchema },
+    },
+    required: ["overview", "concepts"],
+  };
 
   let overview: string | null = null;
   let conceptDefs: Array<{ name: string; kind?: string; summary?: string; capability?: string | null }> = [];
   try {
-    const { text, provider, model } = await generateWithRetry({ prompt: promptA, json: true, maxTokens: 1500, temperature: 0.2 });
+    const { text, provider, model } = await generateWithRetry({ prompt: promptA, json: true, schema: passASchema, schemaName: "concept_proposal", maxTokens: 1500, temperature: 0.2 });
     const parsed = parseJsonLoose(text) as any;
     overview = typeof parsed?.overview === "string" ? parsed.overview : null;
     conceptDefs = Array.isArray(parsed?.concepts)
       ? parsed.concepts.filter((c: any) => c && typeof c.name === "string").map((c: any) => ({ name: c.name, kind: c.kind, summary: c.summary, capability: c.capability ?? null }))
       : [];
     console.log(`[enrich:A] ${provider}/${model}: ${conceptDefs.length} concepts proposed`);
+    if (conceptDefs.length === 0) console.error(`[enrich:A] raw output head:`, (text || "").slice(0, 300));
   } catch (err) {
     console.warn(`[enrich:A] failed: ${err instanceof Error ? err.message : err}`);
     throw err; // let the route report the provider error
@@ -73,6 +92,20 @@ Return JSON only:
   }
 
   // ---- Pass B: classify files into concepts over many small rounds ----
+  const passBSchema = {
+    type: "OBJECT",
+    properties: {
+      assignments: {
+        type: "ARRAY",
+        items: { type: "OBJECT", properties: { id: { type: "STRING" }, concept: { type: "STRING" } }, required: ["id", "concept"] },
+      },
+      newConcepts: {
+        type: "ARRAY",
+        items: { type: "OBJECT", properties: { name: { type: "STRING" }, kind: { type: "STRING" }, summary: { type: "STRING" }, capability: { type: "STRING" } }, required: ["name"] },
+      },
+    },
+    required: ["assignments"],
+  };
   const assignments = new Map<string, string>(); // unitId -> canonical concept name
   const BATCH = 18;
   let loggedSample = false;
@@ -90,27 +123,26 @@ Return JSON only:
     const currentNames = [...conceptByNorm.values()].map((c) => c.name);
     const list = batch.map((u) => ({ id: u.id, path: u.filePath }));
     const promptB = `Repository "${repoName}". Concepts so far (prefer these EXACT names): ${JSON.stringify(currentNames)}.
-Assign each file below to the single best-fitting concept. If a file genuinely fits none, invent a new short concept name and include it in "newConcepts".
+Assign each file below to the single best-fitting concept. If a file genuinely fits none, invent a new short concept name (also list it in newConcepts).
 Files:
 ${JSON.stringify(list)}
-Return JSON only:
-{"assignments":{"<file id>":"<concept name>"},"newConcepts":[{"name":"2-4 words","kind":"Capability|Domain|Service|Subsystem|Layer","summary":"one sentence","capability":"tag or null"}]}`;
+Return an "assignments" array with one entry {id, concept} for EVERY file id above, and optionally "newConcepts".`;
     try {
-      const { text } = await generateWithRetry({ prompt: promptB, json: true, maxTokens: 2200, temperature: 0 });
+      const { text } = await generateWithRetry({ prompt: promptB, json: true, schema: passBSchema, schemaName: "file_assignments", maxTokens: 3000, temperature: 0 });
       const parsed = parseJsonLoose(text) as any;
       // Register any newly proposed concepts first so assignments can resolve to them.
       for (const nc of Array.isArray(parsed?.newConcepts) ? parsed.newConcepts : []) {
         if (nc && typeof nc.name === "string") resolveOrAdd(nc.name, { kind: nc.kind, summary: nc.summary, capability: nc.capability ?? null });
       }
-      const map: Record<string, unknown> = (parsed && typeof parsed.assignments === "object" && parsed.assignments) || (parsed && typeof parsed === "object" ? parsed : {});
+      const rows: Array<{ id?: unknown; concept?: unknown }> = Array.isArray(parsed?.assignments) ? parsed.assignments : [];
       if (!loggedSample) {
-        console.log(`[enrich:B] sample keys:`, Object.keys(map).slice(0, 3));
+        console.log(`[enrich:B] first-round rows: ${rows.length}, sample:`, JSON.stringify(rows[0] ?? null));
         loggedSample = true;
       }
-      for (const [ref, name] of Object.entries(map)) {
-        if (ref === "newConcepts") continue;
+      for (const row of rows) {
+        const ref = typeof row.id === "string" ? row.id : "";
         const unitId = idByRef.get(ref) ?? idByRef.get(ref.split("/").pop() ?? ref);
-        const concept = resolveOrAdd(name);
+        const concept = resolveOrAdd(row.concept);
         if (unitId && concept) assignments.set(unitId, concept);
       }
     } catch (err) {
