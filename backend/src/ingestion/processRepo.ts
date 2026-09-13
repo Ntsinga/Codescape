@@ -6,7 +6,7 @@ import { detectLanguageByExtension } from "./detectLanguage.js";
 import { repoSourceDir, repoStorageDir } from "../storage/paths.js";
 import { parseFile } from "../parsing/parseFile.js";
 import { buildGraph, type FileInput } from "../graph/buildGraph.js";
-import { buildSemanticTree } from "../graph/semantic.js";
+import { buildSemanticTree, addSubgroups, buildFileAdjacency } from "../graph/semantic.js";
 import { insertRepo, insertFile, insertNodesBatch, insertEdgesBatch, updateRepoStatus, saveSemanticTree, setRepoOrigin, clearRepoGraph, type RepoOrigin } from "../graph/queries.js";
 import type { ParsedFile } from "../graph/types.js";
 
@@ -102,7 +102,7 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
 
     // Deterministic semantic decomposition, stored immediately (no API key / latency
     // cost). AI enrichment of names/summaries happens on demand via /decompose.
-    const semanticTree = buildSemanticTree(displayName, nodes);
+    const semanticTree = addSubgroups(buildSemanticTree(displayName, nodes), buildFileAdjacency(nodes, edges));
     saveSemanticTree(repoId, semanticTree, false);
 
     updateRepoStatus(repoId, "ready");

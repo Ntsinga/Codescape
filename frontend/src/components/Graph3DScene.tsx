@@ -12,6 +12,7 @@ const TYPE_TINT: Record<string, string> = {
   // Conceptual (Map) layer
   System: "#f0b429",
   Concept: "#58a6ff",
+  Group: "#2dd4bf",
   Unit: "#3fb950",
   // Physical (Files) layer
   Repository: "#f0b429",
@@ -27,6 +28,7 @@ const TYPE_TINT: Record<string, string> = {
 const TYPE_EMBLEM: Record<string, string> = {
   System: "📦",
   Concept: "🧩",
+  Group: "▦",
   Repository: "📦",
   Folder: "📁",
   Class: "{ }",
@@ -217,11 +219,25 @@ function ConceptArtifact({ selected, hovered }: ArtifactProps) {
   );
 }
 
+function GroupArtifact({ selected, hovered }: ArtifactProps) {
+  // Cluster of small cubes — a sub-grouping of related files.
+  const emissive = selected ? 0.7 : hovered ? 0.35 : 0.14;
+  const mat = <meshStandardMaterial color={TYPE_TINT.Group} metalness={0.4} roughness={0.35} emissive={TYPE_TINT.Group} emissiveIntensity={emissive} />;
+  return (
+    <group>
+      <mesh position={[-0.32, 0, 0]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
+      <mesh position={[0.32, 0.1, -0.2]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
+      <mesh position={[0, -0.15, 0.28]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
+    </group>
+  );
+}
+
 function Artifact(props: ArtifactProps) {
   switch (props.node.type) {
     // Conceptual (Map) layer
     case "System": return <RepositoryArtifact {...props} />;
     case "Concept": return <ConceptArtifact {...props} />;
+    case "Group": return <GroupArtifact {...props} />;
     case "Unit": return <FileArtifact {...props} />;
     // Physical (Files) layer
     case "Repository": return <RepositoryArtifact {...props} />;
@@ -276,6 +292,8 @@ function NodeGroup({ layoutNode, dense = false }: { layoutNode: LayoutNode; dens
   const emblem = node.type === "File" || node.type === "Unit" ? null : TYPE_EMBLEM[node.type];
   const kindTag =
     node.type === "Concept" && node.kind && node.kind !== "Area"
+      ? node.kind
+      : node.type === "Group" && node.kind
       ? node.kind
       : node.type === "Unit" && node.role && node.role !== "Core"
       ? node.role
@@ -518,6 +536,7 @@ function Legend() {
     layer === "semantic"
       ? [
           { label: "Concept", swatch: <span className="swatch concept">🧩</span> },
+          { label: "Group", swatch: <span className="swatch group">▦</span> },
           { label: "File", swatch: <span className="swatch file">TS</span> },
           { label: "Function", swatch: <span className="swatch function">ƒ</span> },
         ]

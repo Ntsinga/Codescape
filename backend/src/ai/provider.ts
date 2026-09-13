@@ -7,7 +7,7 @@ import { getSetting, setSetting } from "../graph/queries.js";
  * changeable from the UI), falling back to env defaults. If the selected provider
  * fails (e.g. a 503/429), generation automatically retries on the other provider.
  */
-export type ProviderName = "openai" | "gemini";
+export type ProviderName = "openai" | "gemini" | "deepseek";
 
 export interface GenerateOptions {
   prompt: string;
@@ -22,22 +22,33 @@ export interface GenerateOptions {
 const DEFAULT_MODELS: Record<ProviderName, string> = {
   openai: "gpt-4o-mini",
   gemini: "gemini-3.6-flash",
+  deepseek: "deepseek-chat",
 };
 
 // Used only when the live model list can't be fetched.
 const FALLBACK_MODELS: Record<ProviderName, string[]> = {
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
   gemini: ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
+};
+
+const ENV_MODEL: Record<ProviderName, string | undefined> = {
+  get openai() { return process.env.OPENAI_MODEL; },
+  get gemini() { return process.env.GEMINI_MODEL; },
+  get deepseek() { return process.env.DEEPSEEK_MODEL; },
 };
 
 let openaiClient: OpenAI | null = null;
+let deepseekClient: OpenAI | null = null;
 const openaiKey = () => process.env.OPENAI_API_KEY;
 const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+const deepseekKey = () => process.env.DEEPSEEK_API_KEY;
 
 export function availableProviders(): ProviderName[] {
   const list: ProviderName[] = [];
   if (openaiKey()) list.push("openai");
   if (geminiKey()) list.push("gemini");
+  if (deepseekKey()) list.push("deepseek");
   return list;
 }
 
@@ -53,8 +64,7 @@ export function getSelection(): { provider: ProviderName; model: string } {
     "openai";
 
   const savedModel = getSetting(`ai_model_${provider}`);
-  const envModel = provider === "openai" ? process.env.OPENAI_MODEL : process.env.GEMINI_MODEL;
-  const model = savedModel || envModel || DEFAULT_MODELS[provider];
+  const model = savedModel || ENV_MODEL[provider] || DEFAULT_MODELS[provider];
   return { provider, model };
 }
 
@@ -66,7 +76,7 @@ export function setSelection(provider: ProviderName, model: string): void {
 function modelFor(provider: ProviderName): string {
   const sel = getSelection();
   if (sel.provider === provider) return sel.model;
-  return (provider === "openai" ? process.env.OPENAI_MODEL : process.env.GEMINI_MODEL) || DEFAULT_MODELS[provider];
+  return getSetting(`ai_model_${provider}`) || ENV_MODEL[provider] || DEFAULT_MODELS[provider];
 }
 
 /** Order to try: selected provider first, then the other as fallback. */
@@ -91,6 +101,21 @@ async function callOpenAI(o: GenerateOptions): Promise<string> {
     temperature: o.temperature ?? 0.2,
     max_tokens: o.maxTokens ?? 1000,
     ...(responseFormat ? { response_format: responseFormat } : {}),
+  });
+  return completion.choices[0]?.message?.content ?? "";
+}
+
+async function callDeepSeek(o: GenerateOptions): Promise<string> {
+  const key = deepseekKey();
+  if (!key) throw new Error("DEEPSEEK_API_KEY not set");
+  if (!deepseekClient) deepseekClient = new OpenAI({ apiKey: key, baseURL: "https://api.deepseek.com" });
+  // DeepSeek is OpenAI-compatible but supports only json_object (no json_schema).
+  const completion = await deepseekClient.chat.completions.create({
+    model: modelFor("deepseek"),
+    messages: [{ role: "user", content: o.prompt }],
+    temperature: o.temperature ?? 0.2,
+    max_tokens: o.maxTokens ?? 1000,
+    ...(o.json || o.schema ? { response_format: { type: "json_object" as const } } : {}),
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -153,7 +178,7 @@ export async function generate(o: GenerateOptions): Promise<{ text: string; prov
   const errors: string[] = [];
   for (const provider of order) {
     try {
-      const text = provider === "openai" ? await callOpenAI(o) : await callGemini(o);
+      const text = provider === "openai" ? await callOpenAI(o) : provider === "deepseek" ? await callDeepSeek(o) : await callGemini(o);
       return { text, provider, model: modelFor(provider) };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -201,7 +226,21 @@ async function listGeminiModels(): Promise<string[]> {
   }
 }
 
-export async function listModels(): Promise<{ openai: string[]; gemini: string[] }> {
-  const [openai, gemini] = await Promise.all([listOpenAIModels(), listGeminiModels()]);
-  return { openai, gemini };
+async function listDeepSeekModels(): Promise<string[]> {
+  const key = deepseekKey();
+  if (!key) return [];
+  try {
+    const res = await fetch("https://api.deepseek.com/models", { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) return FALLBACK_MODELS.deepseek;
+    const data = (await res.json()) as any;
+    const ids: string[] = (data?.data ?? []).map((m: any) => m.id).filter(Boolean);
+    return ids.length ? ids.sort() : FALLBACK_MODELS.deepseek;
+  } catch {
+    return FALLBACK_MODELS.deepseek;
+  }
+}
+
+export async function listModels(): Promise<{ openai: string[]; gemini: string[]; deepseek: string[] }> {
+  const [openai, gemini, deepseek] = await Promise.all([listOpenAIModels(), listGeminiModels(), listDeepSeekModels()]);
+  return { openai, gemini, deepseek };
 }

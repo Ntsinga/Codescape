@@ -16,6 +16,7 @@ interface SimNode extends SimulationNodeDatum {
 const TYPE_COLOR: Record<string, string> = {
   System: "#f0b429",
   Concept: "#58a6ff",
+  Group: "#2dd4bf",
   Unit: "#3fb950",
   Repository: "#58a6ff",
   Folder: "#8b949e",
@@ -75,16 +76,16 @@ export function Graph2D() {
     nodesRef.current = simNodes;
 
     const simulation = forceSimulation(simNodes)
-      .force("charge", forceManyBody().strength((d: any) => (d.tier === "grandchild" ? -40 : -220)))
-      .force("collide", forceCollide((d: any) => RADIUS[(d as SimNode).tier] + 6))
-      .force("x", forceX(width / 2).strength(0.05))
-      .force("y", forceY(height / 2).strength(0.05))
+      .force("charge", forceManyBody().strength((d: any) => (d.tier === "grandchild" ? -80 : -520)))
+      .force("collide", forceCollide((d: any) => RADIUS[(d as SimNode).tier] + 46))
+      .force("x", forceX(width / 2).strength(0.04))
+      .force("y", forceY(height / 2).strength(0.04))
       .force(
         "link",
         forceLink(simLinks as any)
           .id((d: any) => d.id)
-          .distance((l: any) => (l.tier === "grandchild" ? 34 : 120))
-          .strength((l: any) => (l.tier === "grandchild" ? 0.7 : 0.4))
+          .distance((l: any) => (l.tier === "grandchild" ? 46 : 190))
+          .strength((l: any) => (l.tier === "grandchild" ? 0.6 : 0.25))
       );
 
     function draw() {

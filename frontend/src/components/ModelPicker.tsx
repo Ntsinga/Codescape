@@ -1,58 +1,65 @@
 import { useEffect, useState } from "react";
-import { getAiModels, selectAiModel, type AiModels } from "../api/client";
+import { getAiModels, selectAiModel, type AiModels, type ProviderName } from "../api/client";
 
-/** Dropdown to switch the active AI provider + model (fetched live from each provider). */
+const PROVIDER_LABEL: Record<ProviderName, string> = {
+  openai: "OpenAI",
+  gemini: "Gemini",
+  deepseek: "DeepSeek",
+};
+
+/** Two dropdowns: provider, then that provider's models (fetched live). */
 export function ModelPicker() {
   const [data, setData] = useState<AiModels | null>(null);
-  const [value, setValue] = useState<string>("");
+  const [provider, setProvider] = useState<ProviderName | "">("");
+  const [model, setModel] = useState<string>("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     getAiModels()
       .then((d) => {
         setData(d);
-        setValue(`${d.current.provider}::${d.current.model}`);
+        setProvider(d.current.provider);
+        setModel(d.current.model);
       })
       .catch(() => setData(null));
   }, []);
 
   if (!data || data.providers.length === 0) return null;
 
-  async function onChange(next: string) {
-    setValue(next);
-    const [provider, model] = next.split("::");
-    setSaving(true);
-    try {
-      await selectAiModel(provider as "openai" | "gemini", model);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // Ensure the current selection is always an option even if the live list missed it.
-  const ensure = (provider: "openai" | "gemini", list: string[]) => {
-    if (data.current.provider === provider && data.current.model && !list.includes(data.current.model)) {
-      return [data.current.model, ...list];
-    }
+  const modelsForProvider = (p: ProviderName): string[] => {
+    const list = data.models[p] ?? [];
+    // Keep the current model visible even if the live list missed it.
+    if (data.current.provider === p && data.current.model && !list.includes(data.current.model)) return [data.current.model, ...list];
     return list;
   };
 
+  async function onProvider(next: ProviderName) {
+    setProvider(next);
+    const first = modelsForProvider(next)[0] ?? "";
+    setModel(first);
+    if (first) await save(next, first);
+  }
+  async function onModel(next: string) {
+    setModel(next);
+    if (provider) await save(provider, next);
+  }
+  async function save(p: ProviderName, m: string) {
+    setSaving(true);
+    try { await selectAiModel(p, m); } finally { setSaving(false); }
+  }
+
   return (
-    <select className="model-picker" value={value} onChange={(e) => onChange(e.target.value)} disabled={saving} title="AI model used for naming & explanations">
-      {data.providers.includes("openai") && data.models.openai.length > 0 && (
-        <optgroup label="OpenAI">
-          {ensure("openai", data.models.openai).map((m) => (
-            <option key={`openai::${m}`} value={`openai::${m}`}>{m}</option>
-          ))}
-        </optgroup>
-      )}
-      {data.providers.includes("gemini") && data.models.gemini.length > 0 && (
-        <optgroup label="Gemini">
-          {ensure("gemini", data.models.gemini).map((m) => (
-            <option key={`gemini::${m}`} value={`gemini::${m}`}>{m}</option>
-          ))}
-        </optgroup>
-      )}
-    </select>
+    <div className="model-picker-group" title="AI provider & model for naming/explanations">
+      <select className="model-picker provider" value={provider} onChange={(e) => onProvider(e.target.value as ProviderName)} disabled={saving}>
+        {data.providers.map((p) => (
+          <option key={p} value={p}>{PROVIDER_LABEL[p]}</option>
+        ))}
+      </select>
+      <select className="model-picker model" value={model} onChange={(e) => onModel(e.target.value)} disabled={saving || !provider}>
+        {provider && modelsForProvider(provider).map((m) => (
+          <option key={m} value={m}>{m}</option>
+        ))}
+      </select>
+    </div>
   );
 }

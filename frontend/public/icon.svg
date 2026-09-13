@@ -1,0 +1,40 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#161b22"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="top" x1="128" y1="34" x2="128" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#79b8ff"/>
+      <stop offset="1" stop-color="#58a6ff"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="128" y1="96" x2="128" y2="166" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3f7fd4"/>
+      <stop offset="1" stop-color="#1f6feb"/>
+    </linearGradient>
+    <linearGradient id="bot" x1="128" y1="158" x2="128" y2="228" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#27508f"/>
+      <stop offset="1" stop-color="#1b3a68"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- connective thread linking the layers (continents to streets) -->
+  <path d="M128 62 L86 110 M128 62 L170 86 M86 124 L128 148 M170 100 L128 148 M108 178 L128 190 M148 172 L128 190"
+        stroke="#58a6ff" stroke-opacity="0.35" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- bottom layer (file/code level) -->
+  <path d="M128 158 L196 194 L128 230 L60 194 Z" fill="url(#bot)" stroke="#0d1117" stroke-width="3"/>
+  <!-- middle layer (module level) -->
+  <path d="M128 96 L196 132 L128 168 L60 132 Z" fill="url(#mid)" stroke="#0d1117" stroke-width="3"/>
+  <!-- top layer (system level) -->
+  <path d="M128 34 L196 70 L128 106 L60 70 Z" fill="url(#top)" stroke="#0d1117" stroke-width="3"/>
+
+  <!-- nodes on the layers -->
+  <circle cx="128" cy="62" r="7" fill="#eaf3ff"/>
+  <circle cx="100" cy="118" r="5.5" fill="#dce9ff"/>
+  <circle cx="158" cy="126" r="5.5" fill="#dce9ff"/>
+  <circle cx="118" cy="184" r="4.5" fill="#cddcff"/>
+  <circle cx="150" cy="178" r="4.5" fill="#cddcff"/>
+</svg>

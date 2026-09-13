@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import type { GraphNode } from "./types.js";
+import type { GraphNode, GraphEdge } from "./types.js";
 
 /**
  * Roles in the CONCEPTUAL map. The map is meant to be understood
@@ -15,7 +15,7 @@ import type { GraphNode } from "./types.js";
  * The raw directory/file structure lives in the separate physical "Files" layer;
  * this layer is the meaning-oriented view.
  */
-export type SemanticType = "System" | "Concept" | "Unit" | "Function";
+export type SemanticType = "System" | "Concept" | "Group" | "Unit" | "Function";
 
 export interface SemanticNode {
   id: string;
@@ -323,4 +323,131 @@ function finalizeCounts(nodes: SemanticNode[]): void {
   const counts = new Map<string, number>();
   for (const n of nodes) if (n.parentId) counts.set(n.parentId, (counts.get(n.parentId) ?? 0) + 1);
   for (const n of nodes) n.childCount = counts.get(n.id) ?? 0;
+}
+
+/** File-to-file adjacency from Imports/Calls edges, keyed by file id (= a Unit's physicalNodeId). */
+export function buildFileAdjacency(nodes: GraphNode[], edges: GraphEdge[]): Map<string, Set<string>> {
+  const fileOf = new Map<string, string | null>();
+  for (const n of nodes) fileOf.set(n.id, n.fileId);
+  const adj = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    if (a === b) return;
+    (adj.get(a) ?? adj.set(a, new Set()).get(a)!).add(b);
+    (adj.get(b) ?? adj.set(b, new Set()).get(b)!).add(a);
+  };
+  for (const e of edges) {
+    if (e.type !== "Imports" && e.type !== "Calls") continue;
+    const fa = fileOf.get(e.fromNodeId);
+    const fb = fileOf.get(e.toNodeId);
+    if (fa && fb) link(fa, fb);
+  }
+  return adj;
+}
+
+const DOC_EXT = /\.(md|mdx|markdown|txt|rst|adoc)$/i;
+const CONFIG_EXT = /\.(json|ya?ml|toml|xml|ini|lock|env)$/i;
+
+function immediateDir(path: string | null): string {
+  if (!path) return "Core";
+  const segs = path.split("/");
+  return segs.length > 1 ? segs[segs.length - 2] : "Core";
+}
+
+/**
+ * Inserts a Group layer between Concept and Unit so large concepts aren't a flat
+ * fan of files. Groups are: Tests, Documentation, Configuration (by role/ext),
+ * then clusters of files that import/call each other, then a directory fallback.
+ * Concepts with few files are left flat.
+ */
+export function addSubgroups(tree: SemanticTree, adjacency: Map<string, Set<string>>): SemanticTree {
+  const nodes = tree.nodes;
+  const concepts = nodes.filter((n) => n.type === "Concept");
+  const groups: SemanticNode[] = [];
+
+  for (const concept of concepts) {
+    const files = nodes.filter((n) => n.type === "Unit" && n.parentId === concept.id);
+    if (files.length <= 6) continue; // keep small concepts flat
+
+    const makeGroup = (name: string, kind: string): SemanticNode => {
+      const g: SemanticNode = {
+        id: nanoid(10), type: "Group", name, rawName: name, kind,
+        summary: `${name} — ${kind.toLowerCase()} within ${concept.name}.`,
+        capability: null, role: null, confidence: 1, source: concept.source,
+        parentId: concept.id, physicalNodeId: null, filePath: null,
+        startLine: null, endLine: null, language: null, childCount: 0, evidence: [],
+      };
+      groups.push(g);
+      return g;
+    };
+
+    const tests: SemanticNode[] = [];
+    const docs: SemanticNode[] = [];
+    const config: SemanticNode[] = [];
+    const core: SemanticNode[] = [];
+    for (const f of files) {
+      if (f.role === "Test") tests.push(f);
+      else if (f.filePath && DOC_EXT.test(f.filePath)) docs.push(f);
+      else if (f.role === "Config" || (f.filePath && CONFIG_EXT.test(f.filePath))) config.push(f);
+      else core.push(f);
+    }
+
+    const attach = (bucket: SemanticNode[], name: string, kind: string) => {
+      if (bucket.length >= 2) {
+        const g = makeGroup(name, kind);
+        for (const f of bucket) f.parentId = g.id;
+      }
+      // singletons remain directly under the concept
+    };
+    attach(tests, "Tests", "Tests");
+    attach(docs, "Documentation", "Docs");
+    attach(config, "Configuration", "Config");
+
+    // Core: connected components of files that talk to each other.
+    const coreIds = new Set(core.map((f) => f.physicalNodeId ?? f.id));
+    const byPhys = new Map(core.map((f) => [f.physicalNodeId ?? f.id, f]));
+    const seen = new Set<string>();
+    const remaining: SemanticNode[] = [];
+    for (const f of core) {
+      const pid = f.physicalNodeId ?? f.id;
+      if (seen.has(pid)) continue;
+      // BFS within core using adjacency
+      const comp: SemanticNode[] = [];
+      const queue = [pid];
+      seen.add(pid);
+      while (queue.length) {
+        const cur = queue.shift()!;
+        const node = byPhys.get(cur);
+        if (node) comp.push(node);
+        for (const nb of adjacency.get(cur) ?? []) {
+          if (coreIds.has(nb) && !seen.has(nb)) { seen.add(nb); queue.push(nb); }
+        }
+      }
+      if (comp.length >= 2) {
+        // Name the cluster by a shared directory if there is one, else by its hub file.
+        const dirs = new Set(comp.map((c) => immediateDir(c.filePath)));
+        const name = dirs.size === 1 ? [...dirs][0] : (comp[0].rawName.replace(/\.[^.]+$/, "") + " & linked");
+        const g = makeGroup(name, "Linked");
+        for (const c of comp) c.parentId = g.id;
+      } else {
+        remaining.push(comp[0] ?? f);
+      }
+    }
+
+    // Leftover core singletons: group by immediate directory when 2+ share one.
+    const byDir = new Map<string, SemanticNode[]>();
+    for (const f of remaining) {
+      const d = immediateDir(f.filePath);
+      (byDir.get(d) ?? byDir.set(d, []).get(d)!).push(f);
+    }
+    for (const [dir, list] of byDir) {
+      if (list.length >= 2) {
+        const g = makeGroup(dir, "Module");
+        for (const f of list) f.parentId = g.id;
+      }
+    }
+  }
+
+  const rebuilt = [...nodes, ...groups];
+  finalizeCounts(rebuilt);
+  return { ...tree, nodes: rebuilt };
 }

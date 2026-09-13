@@ -57,13 +57,14 @@ export function analyzeRepository(repoId: string): Promise<ArchitectureResult> {
   return request(`/repos/${repoId}/analyze`, { method: "POST" });
 }
 
+export type ProviderName = "openai" | "gemini" | "deepseek";
 export interface AiModels {
-  providers: Array<"openai" | "gemini">;
-  models: { openai: string[]; gemini: string[] };
-  current: { provider: "openai" | "gemini"; model: string };
+  providers: ProviderName[];
+  models: Record<ProviderName, string[]>;
+  current: { provider: ProviderName; model: string };
 }
 export function getAiModels(): Promise<AiModels> { return request(`/ai/models`); }
-export function selectAiModel(provider: "openai" | "gemini", model: string): Promise<{ current: { provider: string; model: string } }> {
+export function selectAiModel(provider: ProviderName, model: string): Promise<{ current: { provider: ProviderName; model: string } }> {
   return request(`/ai/select`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, model }) });
 }
 

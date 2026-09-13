@@ -125,6 +125,7 @@ a { color: var(--accent); }
 .ghost-btn:hover { border-color: var(--accent); }
 .ghost-btn.sm { padding: 3px 8px; font-size: 11px; }
 
+.model-picker-group { display: inline-flex; gap: 4px; }
 .model-picker {
   background: var(--bg);
   color: var(--text);
@@ -132,8 +133,9 @@ a { color: var(--accent); }
   border-radius: 8px;
   padding: 6px 8px;
   font-size: 12px;
-  max-width: 180px;
 }
+.model-picker.provider { max-width: 110px; }
+.model-picker.model { max-width: 190px; }
 .model-picker:hover { border-color: var(--accent); }
 
 .ai-pill {
@@ -477,6 +479,7 @@ a { color: var(--accent); }
   color: white;
 }
 .legend .swatch.concept { background: #58a6ff; }
+.legend .swatch.group { background: #2dd4bf; color: #0d1117; }
 .legend .swatch.folder { background: #5c93ff; }
 .legend .swatch.file { background: #3178c6; }
 .legend .swatch.class { background: #d29922; color: #0d1117; }

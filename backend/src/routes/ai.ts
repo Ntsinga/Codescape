@@ -26,8 +26,8 @@ aiRouter.get("/ai/models", async (_req, res) => {
 aiRouter.post("/ai/select", (req, res) => {
   const provider = String(req.body?.provider ?? "") as ProviderName;
   const model = String(req.body?.model ?? "");
-  if (provider !== "openai" && provider !== "gemini") {
-    res.status(400).json({ error: "provider must be 'openai' or 'gemini'" });
+  if (provider !== "openai" && provider !== "gemini" && provider !== "deepseek") {
+    res.status(400).json({ error: "provider must be 'openai', 'gemini', or 'deepseek'" });
     return;
   }
   if (!availableProviders().includes(provider)) {

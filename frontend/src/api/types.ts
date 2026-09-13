@@ -62,7 +62,7 @@ export interface ImpactResult {
 export interface ArchitectureFinding { title: string; summary: string; confidence: number; evidence: EvidenceRef[]; }
 export interface ArchitectureResult { summary: string; findings: ArchitectureFinding[]; }
 
-export type SemanticType = "System" | "Concept" | "Unit" | "Function";
+export type SemanticType = "System" | "Concept" | "Group" | "Unit" | "Function";
 
 export interface SemanticNode {
   id: string;
