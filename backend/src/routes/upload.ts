@@ -28,7 +28,7 @@ uploadRouter.post("/repos", upload.single("archive"), async (req, res) => {
   const displayName = (req.body?.name as string | undefined)?.trim() || path.basename(req.file.originalname, ".zip");
 
   try {
-    const result = await processRepoZip(req.file.path, displayName);
+    const result = await processRepoZip(req.file.path, displayName, { origin: { kind: "zip", owner: null, repo: null, branch: null } });
     res.status(201).json(result);
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "Failed to process repository" });

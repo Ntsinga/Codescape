@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { processRepoZip } from "../ingestion/processRepo.js";
 import { uploadsTmpDir } from "../storage/paths.js";
+import { getRepo } from "../graph/queries.js";
 
 const githubRouter = Router();
 const pending = new Map<string, { createdAt: number }>();
@@ -60,17 +61,55 @@ githubRouter.get("/github/repos", async (req, res) => {
   res.json(repos.map((r: any) => ({ id: r.id, name: r.name, fullName: r.full_name, private: r.private, defaultBranch: r.default_branch, cloneUrl: r.clone_url })));
 });
 
+async function downloadZipball(token: string, owner: string, repo: string, branch: string | undefined): Promise<string> {
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(branch ?? "HEAD")}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } }
+  );
+  if (!response.ok || !response.body) throw new Error("Unable to download GitHub repository");
+  const zipPath = path.join(uploadsTmpDir, `github-${crypto.randomBytes(8).toString("hex")}.zip`);
+  await fs.writeFile(zipPath, Buffer.from(await response.arrayBuffer()));
+  return zipPath;
+}
+
 githubRouter.post("/github/import", async (req, res) => {
   const current = session(req);
   if (!current) { res.status(401).json({ error: "Connect GitHub first" }); return; }
   const { owner, repo, branch } = req.body ?? {};
   if (!owner || !repo) { res.status(400).json({ error: "owner and repo are required" }); return; }
-  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(branch ?? "HEAD")}`, { headers: { Authorization: `Bearer ${current.token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
-  if (!response.ok || !response.body) { res.status(response.status || 502).json({ error: "Unable to download GitHub repository" }); return; }
-  const zipPath = path.join(uploadsTmpDir, `github-${crypto.randomBytes(8).toString("hex")}.zip`);
-  await fs.writeFile(zipPath, Buffer.from(await response.arrayBuffer()));
-  try { res.status(201).json(await processRepoZip(zipPath, `${owner}/${repo}`)); }
-  catch (err) { res.status(422).json({ error: err instanceof Error ? err.message : "GitHub repository processing failed" }); }
+  try {
+    const zipPath = await downloadZipball(current.token, owner, repo, branch);
+    const result = await processRepoZip(zipPath, `${owner}/${repo}`, {
+      origin: { kind: "github", owner, repo, branch: branch ?? "HEAD" },
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    res.status(422).json({ error: err instanceof Error ? err.message : "GitHub repository processing failed" });
+  }
+});
+
+/** Re-fetch a previously imported GitHub repo into the SAME repo id (no duplicate). */
+githubRouter.post("/github/reimport", async (req, res) => {
+  const current = session(req);
+  if (!current) { res.status(401).json({ error: "Connect GitHub first" }); return; }
+  const repoId = String(req.body?.repoId ?? "");
+  const record = getRepo(repoId);
+  if (!record) { res.status(404).json({ error: "Repository not found" }); return; }
+  if (record.origin.kind !== "github" || !record.origin.owner || !record.origin.repo) {
+    res.status(400).json({ error: "This repository was not imported from GitHub" });
+    return;
+  }
+  try {
+    const { owner, repo, branch } = record.origin;
+    const zipPath = await downloadZipball(current.token, owner, repo, branch ?? undefined);
+    const result = await processRepoZip(zipPath, record.name, {
+      repoId,
+      origin: { kind: "github", owner, repo, branch: branch ?? "HEAD" },
+    });
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(422).json({ error: err instanceof Error ? err.message : "GitHub re-import failed" });
+  }
 });
 
 export { githubRouter };

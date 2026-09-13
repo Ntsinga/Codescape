@@ -71,4 +71,13 @@ function migrate(database: Database.Database): void {
   if (!cols.some((c) => c.name === "semantic_enriched")) {
     database.exec(`ALTER TABLE repos ADD COLUMN semantic_enriched INTEGER NOT NULL DEFAULT 0`);
   }
+  // Origin tracking, so a repo can be re-imported in place.
+  for (const [col, ddl] of [
+    ["origin_kind", `ALTER TABLE repos ADD COLUMN origin_kind TEXT`],
+    ["origin_owner", `ALTER TABLE repos ADD COLUMN origin_owner TEXT`],
+    ["origin_repo", `ALTER TABLE repos ADD COLUMN origin_repo TEXT`],
+    ["origin_branch", `ALTER TABLE repos ADD COLUMN origin_branch TEXT`],
+  ] as const) {
+    if (!cols.some((c) => c.name === col)) database.exec(ddl);
+  }
 }

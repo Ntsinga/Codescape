@@ -46,6 +46,7 @@ export interface RepoSummary {
   createdAt: string;
   status: "processing" | "ready" | "failed";
   error: string | null;
+  origin?: { kind: "zip" | "github" | null; owner: string | null; repo: string | null; branch: string | null };
 }
 
 export interface ExplainResult {

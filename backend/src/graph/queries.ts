@@ -1,12 +1,20 @@
 import { getDb } from "./db.js";
 import type { EdgeType, GraphEdge, GraphNode, NodeType } from "./types.js";
 
+export interface RepoOrigin {
+  kind: "zip" | "github" | null;
+  owner: string | null;
+  repo: string | null;
+  branch: string | null;
+}
+
 export interface RepoRecord {
   id: string;
   name: string;
   createdAt: string;
   status: "processing" | "ready" | "failed";
   error: string | null;
+  origin: RepoOrigin;
 }
 
 export function insertRepo(repo: RepoRecord): void {
@@ -19,15 +27,43 @@ export function updateRepoStatus(id: string, status: RepoRecord["status"], error
   getDb().prepare(`UPDATE repos SET status = ?, error = ? WHERE id = ?`).run(status, error ?? null, id);
 }
 
+function rowToRepo(row: any): RepoRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    status: row.status,
+    error: row.error,
+    origin: { kind: row.origin_kind ?? null, owner: row.origin_owner ?? null, repo: row.origin_repo ?? null, branch: row.origin_branch ?? null },
+  };
+}
+
 export function getRepo(id: string): RepoRecord | undefined {
   const row = getDb().prepare(`SELECT * FROM repos WHERE id = ?`).get(id) as any;
-  if (!row) return undefined;
-  return { id: row.id, name: row.name, createdAt: row.created_at, status: row.status, error: row.error };
+  return row ? rowToRepo(row) : undefined;
 }
 
 export function listRepos(): RepoRecord[] {
   const rows = getDb().prepare(`SELECT * FROM repos ORDER BY created_at DESC`).all() as any[];
-  return rows.map((row) => ({ id: row.id, name: row.name, createdAt: row.created_at, status: row.status, error: row.error }));
+  return rows.map(rowToRepo);
+}
+
+export function setRepoOrigin(id: string, origin: RepoOrigin): void {
+  getDb()
+    .prepare(`UPDATE repos SET origin_kind = ?, origin_owner = ?, origin_repo = ?, origin_branch = ? WHERE id = ?`)
+    .run(origin.kind, origin.owner, origin.repo, origin.branch, id);
+}
+
+/** Clears a repo's derived graph + semantic data (for in-place re-import). */
+export function clearRepoGraph(id: string): void {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM nodes WHERE repo_id = ?`).run(id);
+    db.prepare(`DELETE FROM edges WHERE repo_id = ?`).run(id);
+    db.prepare(`DELETE FROM files WHERE repo_id = ?`).run(id);
+    db.prepare(`UPDATE repos SET semantic_json = NULL, semantic_enriched = 0 WHERE id = ?`).run(id);
+  });
+  tx();
 }
 
 export function saveSemanticTree(repoId: string, tree: unknown, enriched: boolean): void {

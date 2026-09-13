@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, uploadRepo } from "../api/client";
+import { getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 
@@ -58,6 +58,24 @@ export function UploadView() {
     },
     [openLoaded]
   );
+
+  async function reimport(repo: RepoSummary) {
+    if (!githubConnection) {
+      setError("Connect GitHub first to re-import (click “Connect GitHub”).");
+      return;
+    }
+    setUploading(true);
+    setError(null);
+    try {
+      await reimportGitHubRepo(githubConnection, repo.id);
+      await openLoaded(repo.id, repo.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Re-import failed");
+    } finally {
+      setUploading(false);
+      refreshRepos();
+    }
+  }
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -135,7 +153,19 @@ export function UploadView() {
           {repos.map((r) => (
             <div key={r.id} className="repo-row" onClick={() => openRepo(r)}>
               <span>{r.name}</span>
-              <span className={`status-tag ${r.status}`}>{r.status}</span>
+              <span className="repo-row-actions">
+                {r.origin?.kind === "github" && (
+                  <button
+                    type="button"
+                    className="row-btn"
+                    title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
+                    onClick={(e) => { e.stopPropagation(); reimport(r); }}
+                  >
+                    ↻ Re-import
+                  </button>
+                )}
+                <span className={`status-tag ${r.status}`}>{r.status}</span>
+              </span>
             </div>
           ))}
         </div>

@@ -69,3 +69,6 @@ export function importGitHubRepo(connection: string, fullName: string, branch: s
   const [owner, repo] = fullName.split("/");
   return request(`/github/import?connection=${encodeURIComponent(connection)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, repo, branch }) });
 }
+export function reimportGitHubRepo(connection: string, repoId: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
+  return request(`/github/reimport?connection=${encodeURIComponent(connection)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repoId }) });
+}

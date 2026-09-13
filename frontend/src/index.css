@@ -378,6 +378,16 @@ a { color: var(--accent); }
 .status-tag.ready { color: var(--green); }
 .status-tag.failed { color: var(--red); }
 .status-tag.processing { color: var(--amber); }
+.repo-row-actions { display: inline-flex; align-items: center; gap: 10px; }
+.row-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.row-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 .highlighted-range {
   background: rgba(88, 166, 255, 0.15);

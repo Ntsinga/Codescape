@@ -3,17 +3,23 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import { extractZip } from "./extractZip.js";
 import { detectLanguageByExtension } from "./detectLanguage.js";
-import { repoSourceDir } from "../storage/paths.js";
+import { repoSourceDir, repoStorageDir } from "../storage/paths.js";
 import { parseFile } from "../parsing/parseFile.js";
 import { buildGraph, type FileInput } from "../graph/buildGraph.js";
 import { buildSemanticTree } from "../graph/semantic.js";
-import { insertRepo, insertFile, insertNodesBatch, insertEdgesBatch, updateRepoStatus, saveSemanticTree } from "../graph/queries.js";
+import { insertRepo, insertFile, insertNodesBatch, insertEdgesBatch, updateRepoStatus, saveSemanticTree, setRepoOrigin, clearRepoGraph, type RepoOrigin } from "../graph/queries.js";
 import type { ParsedFile } from "../graph/types.js";
 
 export interface ProcessResult {
   repoId: string;
   fileCount: number;
   symbolCount: number;
+}
+
+export interface ProcessOptions {
+  /** When set, re-process into this existing repo id (clears its prior data) instead of creating a new one. */
+  repoId?: string;
+  origin?: RepoOrigin;
 }
 
 /**
@@ -54,9 +60,18 @@ async function stripCommonPrefix<T extends { relativePath: string; absolutePath:
  * language detection, tree-sitter parsing, and common-graph construction —
  * matching the "deterministic analysis first" principle from the product spec.
  */
-export async function processRepoZip(zipPath: string, displayName: string): Promise<ProcessResult> {
-  const repoId = nanoid(12);
-  insertRepo({ id: repoId, name: displayName, createdAt: new Date().toISOString(), status: "processing", error: null });
+export async function processRepoZip(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
+  const isReplace = Boolean(options.repoId);
+  const repoId = options.repoId ?? nanoid(12);
+
+  if (isReplace) {
+    updateRepoStatus(repoId, "processing");
+    clearRepoGraph(repoId);
+    await fs.rm(repoStorageDir(repoId), { recursive: true, force: true }).catch(() => undefined);
+  } else {
+    insertRepo({ id: repoId, name: displayName, createdAt: new Date().toISOString(), status: "processing", error: null, origin: { kind: null, owner: null, repo: null, branch: null } });
+  }
+  if (options.origin) setRepoOrigin(repoId, options.origin);
 
   try {
     const destDir = repoSourceDir(repoId);

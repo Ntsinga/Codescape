@@ -30,6 +30,21 @@ export function ExplorerView() {
   const [enrichNote, setEnrichNote] = useState<string | null>(null);
   const enrichAttempted = useRef<string | null>(null);
 
+  async function rebuildMap() {
+    if (!repoId || enriching) return;
+    setEnriching(true);
+    setEnrichNote(null);
+    try {
+      const tree = await decomposeRepository(repoId, true);
+      setSemantic({ nodes: tree.nodes, aiEnriched: tree.aiEnriched });
+      if (!tree.aiEnriched) setEnrichNote(tree.enrichmentError ?? "AI naming unavailable — showing structural names.");
+    } catch (err) {
+      setEnrichNote(err instanceof Error ? err.message : "Rebuild failed");
+    } finally {
+      setEnriching(false);
+    }
+  }
+
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [analysis, setAnalysis] = useState<ArchitectureResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -94,6 +109,11 @@ export function ExplorerView() {
           </div>
 
           <SearchBar />
+          {layer === "semantic" && (
+            <button className="ghost-btn" onClick={rebuildMap} disabled={enriching} title="Regenerate the AI capability map">
+              {enriching ? "Rebuilding…" : "↻ Rebuild map"}
+            </button>
+          )}
           <button className="ghost-btn" onClick={() => setInsightsOpen((v) => !v)}>Insights</button>
         </div>
       </div>
