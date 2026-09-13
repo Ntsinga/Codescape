@@ -170,7 +170,13 @@ async function callGemini(o: GenerateOptions): Promise<string> {
   return text;
 }
 
-export async function generate(o: GenerateOptions): Promise<{ text: string; provider: ProviderName; model: string }> {
+export async function generate(rawOptions: GenerateOptions): Promise<{ text: string; provider: ProviderName; model: string }> {
+  // OpenAI and DeepSeek's json_object response format both require the literal
+  // word "json" to appear somewhere in the prompt, or they reject the request
+  // with a 400 — easy to trip when a prompt only says "structured" or similar.
+  const needsJsonWord = (rawOptions.json || rawOptions.schema) && !/\bjson\b/i.test(rawOptions.prompt);
+  const o: GenerateOptions = needsJsonWord ? { ...rawOptions, prompt: `${rawOptions.prompt}\n\nRespond with JSON only.` } : rawOptions;
+
   const order = await providerOrder();
   if (order.length === 0) {
     throw new Error("No AI provider configured. Set OPENAI_API_KEY or GEMINI_API_KEY in backend/.env.");
