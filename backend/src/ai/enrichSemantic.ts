@@ -58,7 +58,7 @@ Return the overview and a list of concepts.`;
   let overview: string | null = null;
   let conceptDefs: Array<{ name: string; kind?: string; summary?: string; capability?: string | null }> = [];
   try {
-    const { text, provider, model } = await generateWithRetry({ prompt: promptA, json: true, schema: passASchema, schemaName: "concept_proposal", maxTokens: 1500, temperature: 0.2 });
+    const { text, provider, model } = await generateWithRetry({ prompt: promptA, json: true, schema: passASchema, schemaName: "concept_proposal", maxTokens: 3000, temperature: 0.2 });
     const parsed = parseJsonLoose(text) as any;
     overview = typeof parsed?.overview === "string" ? parsed.overview : null;
     conceptDefs = Array.isArray(parsed?.concepts)
