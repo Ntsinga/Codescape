@@ -89,6 +89,32 @@ export async function setSetting(key: string, value: string): Promise<void> {
   await getPool().query(`INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, [key, value]);
 }
 
+// ---- GitHub OAuth (persisted so they survive backend restarts) ----
+
+export async function savePendingOAuthState(state: string): Promise<void> {
+  await getPool().query(`INSERT INTO github_oauth_state (state, created_at) VALUES ($1, $2) ON CONFLICT (state) DO NOTHING`, [state, new Date().toISOString()]);
+}
+
+/** Returns the state's creation time and deletes it (single-use); null if unknown. */
+export async function consumePendingOAuthState(state: string): Promise<Date | null> {
+  const { rows } = await getPool().query(`DELETE FROM github_oauth_state WHERE state = $1 RETURNING created_at`, [state]);
+  return rows[0] ? new Date(rows[0].created_at) : null;
+}
+
+export async function saveGithubSession(connection: string, token: string): Promise<void> {
+  await getPool().query(`INSERT INTO github_sessions (connection, token, created_at) VALUES ($1, $2, $3) ON CONFLICT (connection) DO UPDATE SET token = excluded.token`, [
+    connection,
+    token,
+    new Date().toISOString(),
+  ]);
+}
+
+export async function getGithubSessionToken(connection: string): Promise<string | null> {
+  if (!connection) return null;
+  const { rows } = await getPool().query(`SELECT token FROM github_sessions WHERE connection = $1`, [connection]);
+  return rows[0] ? rows[0].token : null;
+}
+
 export async function saveSemanticTree(repoId: string, tree: unknown, enriched: boolean): Promise<void> {
   await getPool().query(`UPDATE repos SET semantic_json = $1, semantic_enriched = $2 WHERE id = $3`, [JSON.stringify(tree), enriched, repoId]);
 }

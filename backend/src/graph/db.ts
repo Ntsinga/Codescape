@@ -92,5 +92,17 @@ async function migrate(): Promise<void> {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+
+    -- GitHub OAuth: persisted so connections survive backend restarts/cold starts
+    -- (the free tier recycles memory frequently, which would otherwise drop sessions).
+    CREATE TABLE IF NOT EXISTS github_sessions (
+      connection TEXT PRIMARY KEY,
+      token TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS github_oauth_state (
+      state TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL
+    );
   `);
 }
