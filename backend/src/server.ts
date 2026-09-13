@@ -66,6 +66,11 @@ async function main() {
   });
 }
 
+// Keep the process alive on stray async errors (a single bad request shouldn't
+// take the whole server down). Genuine OOM kills are not catchable here.
+process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
+process.on("uncaughtException", (err) => console.error("[uncaughtException]", err));
+
 main().catch((err) => {
   console.error("Fatal startup error:", err);
   process.exit(1);

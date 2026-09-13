@@ -48,8 +48,8 @@ const MAX_TOTAL_BYTES = 300 * 1024 * 1024; // 300MB per repo, uncompressed
 const MAX_FILE_COUNT = 50_000;
 // File content is persisted in Postgres (for the source viewer/AI, since Render's
 // free tier has no persistent disk) — capped well under Neon's free storage tier
-// so a handful of imported repos don't exhaust it.
-const MAX_STORED_CONTENT_BYTES = 50 * 1024 * 1024; // 50MB of source text per repo
+// and the 512MB instance memory so imports don't exhaust either.
+const MAX_STORED_CONTENT_BYTES = 25 * 1024 * 1024; // 25MB of source text per repo
 
 export function isIgnoredDir(dirName: string): boolean {
   return IGNORED_DIR_NAMES.has(dirName) || dirName.startsWith(".");

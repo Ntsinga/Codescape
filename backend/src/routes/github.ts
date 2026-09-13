@@ -1,6 +1,9 @@
 import { Router } from "express";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { processRepoZip } from "../ingestion/processRepo.js";
 import { uploadsTmpDir } from "../storage/paths.js";
@@ -106,7 +109,9 @@ async function downloadZipball(token: string, owner: string, repo: string, branc
   );
   if (!response.ok || !response.body) throw new Error("Unable to download GitHub repository");
   const zipPath = path.join(uploadsTmpDir, `github-${crypto.randomBytes(8).toString("hex")}.zip`);
-  await fs.writeFile(zipPath, Buffer.from(await response.arrayBuffer()));
+  // Stream to disk rather than buffering the whole archive in memory — a large
+  // zipball would otherwise spike RAM and OOM-kill the (512MB) instance.
+  await pipeline(Readable.fromWeb(response.body as any), createWriteStream(zipPath));
   return zipPath;
 }
 

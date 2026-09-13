@@ -105,10 +105,17 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
     const extracted = await stripCommonPrefix(extractedRaw, destDir);
 
     const fileInputs: FileInput[] = [];
-    const fileRecords: Array<{ id: string; repoId: string; path: string; language: string | null }> = [];
-    const contentsToStore: Array<{ path: string; content: string }> = [];
+    let fileRecords: Array<{ id: string; repoId: string; path: string; language: string | null }> = [];
+    let contentsToStore: Array<{ path: string; content: string }> = [];
     const parsedByPath = new Map<string, ParsedFile>();
     let storedBytes = 0;
+
+    // Flush accumulated rows to Postgres and release them, so peak memory stays
+    // bounded regardless of repo size (the free instance has only 512MB).
+    const flush = async () => {
+      if (fileRecords.length) { await insertFilesBatch(fileRecords); fileRecords = []; }
+      if (contentsToStore.length) { await insertFileContentsBatch(repoId, contentsToStore); contentsToStore = []; }
+    };
 
     for (const file of extracted) {
       const language = detectLanguageByExtension(file.relativePath);
@@ -125,13 +132,16 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
         storedBytes += Buffer.byteLength(sourceText, "utf-8");
       }
 
-      if (language === "unknown") continue;
-      const parsed = await parseFile(file.relativePath, language, sourceText);
-      if (parsed) parsedByPath.set(file.relativePath, parsed);
+      if (language !== "unknown") {
+        const parsed = await parseFile(file.relativePath, language, sourceText);
+        if (parsed) parsedByPath.set(file.relativePath, parsed);
+      }
+
+      // Periodically flush so we never hold the whole repo's contents at once.
+      if (fileRecords.length >= 50 || contentsToStore.length >= 40) await flush();
     }
 
-    await insertFilesBatch(fileRecords);
-    await insertFileContentsBatch(repoId, contentsToStore);
+    await flush();
 
     const { nodes, edges } = buildGraph(repoId, displayName, fileInputs, parsedByPath);
     await insertNodesBatch(nodes);
