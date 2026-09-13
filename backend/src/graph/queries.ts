@@ -80,6 +80,38 @@ export async function clearRepoGraph(id: string): Promise<void> {
   }
 }
 
+/** Deletes a repository and all of its derived data. */
+export async function deleteRepo(id: string): Promise<void> {
+  const db = getPool();
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM nodes WHERE repo_id = $1`, [id]);
+    await client.query(`DELETE FROM edges WHERE repo_id = $1`, [id]);
+    await client.query(`DELETE FROM files WHERE repo_id = $1`, [id]);
+    await client.query(`DELETE FROM file_contents WHERE repo_id = $1`, [id]);
+    await client.query(`DELETE FROM repos WHERE id = $1`, [id]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Any repo left in "processing" after a restart was interrupted (the worker died,
+ * e.g. an OOM), since nothing is actually processing in a fresh process. Mark
+ * those failed so they don't sit "processing" forever. Returns how many.
+ */
+export async function failStaleProcessing(): Promise<number> {
+  const { rowCount } = await getPool().query(
+    `UPDATE repos SET status = 'failed', error = 'Interrupted by a server restart' WHERE status = 'processing'`
+  );
+  return rowCount ?? 0;
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   const { rows } = await getPool().query(`SELECT value FROM settings WHERE key = $1`, [key]);
   return rows[0] ? rows[0].value : null;
@@ -149,7 +181,8 @@ export async function insertFileContentsBatch(repoId: string, files: Array<{ pat
   await batchInsert(
     "file_contents",
     ["repo_id", "path", "content"],
-    files.map((f) => [repoId, f.path, f.content])
+    // Defensive: strip any NUL bytes — Postgres TEXT can't store 0x00.
+    files.map((f) => [repoId, f.path, f.content.replace(new RegExp(String.fromCharCode(0), "g"), "")])
   );
 }
 

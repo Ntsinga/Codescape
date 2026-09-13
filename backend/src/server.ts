@@ -5,6 +5,7 @@ import swaggerUi from "swagger-ui-express";
 import { openApiSpec } from "./openapi.js";
 import { ensureDataDirs } from "./storage/paths.js";
 import { ensureMigrated } from "./graph/db.js";
+import { failStaleProcessing } from "./graph/queries.js";
 import { uploadRouter } from "./routes/upload.js";
 import { reposRouter } from "./routes/repos.js";
 import { graphRouter } from "./routes/graph.js";
@@ -16,6 +17,8 @@ import { semanticRouter } from "./routes/semantic.js";
 async function main() {
   ensureDataDirs();
   await ensureMigrated(); // run Postgres migrations before accepting traffic
+  const recovered = await failStaleProcessing().catch(() => 0);
+  if (recovered) console.log(`Recovered ${recovered} repo(s) stuck in "processing" from a prior restart.`);
 
   const app = express();
   app.use(cors());

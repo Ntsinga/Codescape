@@ -61,6 +61,10 @@ export function getRepo(id: string): Promise<RepoSummary> {
   return request(`/repos/${id}`);
 }
 
+export function deleteRepo(id: string): Promise<{ ok: boolean }> {
+  return request(`/repos/${id}`, { method: "DELETE" });
+}
+
 export function getGraph(repoId: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
   return request(`/repos/${repoId}/graph`);
 }

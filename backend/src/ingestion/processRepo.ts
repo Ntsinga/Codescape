@@ -125,6 +125,10 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
       const sourceText = await fs.readFile(file.absolutePath, "utf-8").catch(() => null);
       if (sourceText === null) continue;
 
+      // A NUL byte means the file is binary (or wrong-encoded) — Postgres TEXT
+      // can't hold 0x00, and it isn't real source, so skip storing and parsing it.
+      if (sourceText.indexOf(String.fromCharCode(0)) !== -1) continue;
+
       // Persist content for the source viewer / AI explain, skipping secrets and
       // stopping once we hit the per-repo storage cap (Neon free tier is limited).
       if (!isSecretLike(file.relativePath) && storedBytes < limits.MAX_STORED_CONTENT_BYTES) {

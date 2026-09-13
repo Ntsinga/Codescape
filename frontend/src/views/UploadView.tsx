@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
+import { deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 
@@ -84,6 +84,18 @@ export function UploadView() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Re-import failed");
       setBusy(null);
+      refreshRepos();
+    }
+  }
+
+  async function removeRepo(repo: RepoSummary) {
+    if (!window.confirm(`Delete "${repo.name}" and its analysis? This can't be undone.`)) return;
+    setError(null);
+    try {
+      await deleteRepo(repo.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete repository");
+    } finally {
       refreshRepos();
     }
   }
@@ -223,24 +235,40 @@ export function UploadView() {
           <h2 className="section-label">Previously analyzed</h2>
           <div className="recent-grid">
             {repos.map((r) => (
-              <button key={r.id} type="button" className="recent-card" onClick={() => openRepo(r)} disabled={r.status !== "ready"}>
+              <div
+                key={r.id}
+                className={`recent-card${r.status === "ready" ? "" : " not-ready"}`}
+                role={r.status === "ready" ? "button" : undefined}
+                tabIndex={r.status === "ready" ? 0 : undefined}
+                onClick={() => r.status === "ready" && openRepo(r)}
+                title={r.status === "ready" ? `Open ${r.name}` : r.status === "processing" ? "Still processing" : r.error ?? "Failed to analyze"}
+              >
                 <span className="recent-icon" data-origin={r.origin?.kind ?? "zip"}>{r.origin?.kind === "github" ? "⎇" : "⬆"}</span>
                 <span className="recent-body">
                   <span className="recent-name">{r.name}</span>
                   <span className={`status-tag ${r.status}`}>{r.status}</span>
                 </span>
-                {r.origin?.kind === "github" && (
-                  <span
-                    className="row-btn"
-                    role="button"
-                    tabIndex={0}
-                    title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
-                    onClick={(e) => { e.stopPropagation(); reimport(r); }}
+                <span className="recent-actions">
+                  {r.origin?.kind === "github" && r.status === "ready" && (
+                    <button
+                      type="button"
+                      className="row-btn"
+                      title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
+                      onClick={(e) => { e.stopPropagation(); reimport(r); }}
+                    >
+                      ↻
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="row-btn danger"
+                    title="Delete this repository"
+                    onClick={(e) => { e.stopPropagation(); removeRepo(r); }}
                   >
-                    ↻
-                  </span>
-                )}
-              </button>
+                    ✕
+                  </button>
+                </span>
+              </div>
             ))}
           </div>
         </section>
