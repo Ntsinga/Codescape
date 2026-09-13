@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo } from "../api/client";
+import { getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 
 export function UploadView() {
   const [dragOver, setDragOver] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // holds a status message while any load is in flight
+  const uploading = busy !== null;
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<RepoSummary[]>([]);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
@@ -30,6 +31,7 @@ export function UploadView() {
   }, []);
 
   useEffect(() => {
+    warmup(); // nudge the backend awake so the first real action isn't a cold start
     refreshRepos();
     const params = new URLSearchParams(window.location.search);
     const connection = params.get("connection");
@@ -46,18 +48,25 @@ export function UploadView() {
 
   async function importSelectedGitHub(repo: GitHubRepo) {
     if (!githubConnection) return;
-    setUploading(true); setError(null);
+    setBusy(`Importing ${repo.fullName}…`); setError(null);
     try {
       const result = await importGitHubRepo(githubConnection, repo.fullName, repo.defaultBranch);
       await openLoaded(result.repoId, repo.fullName);
-    } catch (err) { setError(err instanceof Error ? err.message : "GitHub import failed"); }
-    finally { setUploading(false); refreshRepos(); }
+    } catch (err) { setError(err instanceof Error ? err.message : "GitHub import failed"); setBusy(null); refreshRepos(); }
   }
 
   const openRepo = useCallback(
     async (repo: RepoSummary) => {
       if (repo.status !== "ready") return;
-      await openLoaded(repo.id, repo.name);
+      setBusy(`Opening ${repo.name}…`);
+      setError(null);
+      try {
+        await openLoaded(repo.id, repo.name);
+        // On success the view switches to the explorer; no need to clear busy.
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to open repository");
+        setBusy(null);
+      }
     },
     [openLoaded]
   );
@@ -67,15 +76,14 @@ export function UploadView() {
       setError("Connect GitHub first to re-import (click “Connect GitHub”).");
       return;
     }
-    setUploading(true);
+    setBusy(`Re-importing ${repo.name}…`);
     setError(null);
     try {
       await reimportGitHubRepo(githubConnection, repo.id);
       await openLoaded(repo.id, repo.name);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Re-import failed");
-    } finally {
-      setUploading(false);
+      setBusy(null);
       refreshRepos();
     }
   }
@@ -86,7 +94,7 @@ export function UploadView() {
         setError("Please upload a .zip archive");
         return;
       }
-      setUploading(true);
+      setBusy("Analyzing repository…");
       setError(null);
       try {
         const name = file.name.replace(/\.zip$/i, "");
@@ -94,87 +102,153 @@ export function UploadView() {
         await openLoaded(result.repoId, name);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Upload failed");
-      } finally {
-        setUploading(false);
+        setBusy(null);
         refreshRepos();
       }
     },
     [openLoaded, refreshRepos]
   );
 
-  return (
-    <div className="upload-screen">
-      <h1>Codescape</h1>
-      <p className="tagline">An explorable atlas of any codebase.</p>
-      <p className="overview">
-        Upload a repo and Codescape maps it into a navigable system model — zoom from
-        high-level capabilities down through files and functions to the source itself,
-        like an atlas that goes from continents to streets.
-      </p>
-      <p style={{ color: "var(--text-dim)" }}>Or connect a GitHub repository</p>
-      <a href={`${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`}><button type="button">Connect GitHub</button></a>
-      <div
-        className={`dropzone${dragOver ? " dragover" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-          const file = e.dataTransfer.files[0];
-          if (file) handleFile(file);
-        }}
-      >
-        {uploading ? (
-          <p>Uploading and analyzing…</p>
-        ) : (
-          <>
-            <p>Drag a repository .zip here, or</p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handleFile(file);
-              }}
-            />
-            <button type="button" onClick={() => fileInputRef.current?.click()}>
-              Choose file
-            </button>
-          </>
-        )}
-        {error && <p style={{ color: "var(--red)" }}>{error}</p>}
-      </div>
+  const githubConnectUrl = `${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`;
 
-      {repos.length > 0 && (
-        <div className="repo-list">
-          <h3>Previously analyzed</h3>
-          {repos.map((r) => (
-            <div key={r.id} className="repo-row" onClick={() => openRepo(r)}>
-              <span>{r.name}</span>
-              <span className="repo-row-actions">
-                {r.origin?.kind === "github" && (
-                  <button
-                    type="button"
-                    className="row-btn"
-                    title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
-                    onClick={(e) => { e.stopPropagation(); reimport(r); }}
-                  >
-                    ↻ Re-import
-                  </button>
-                )}
-                <span className={`status-tag ${r.status}`}>{r.status}</span>
-              </span>
-            </div>
-          ))}
+  return (
+    <div className="landing">
+      <div className="landing-glow" aria-hidden="true" />
+
+      {busy && (
+        <div className="loading-overlay" role="status" aria-live="polite">
+          <div className="loading-card">
+            <div className="spinner large" aria-hidden="true" />
+            <p className="loading-msg">{busy}</p>
+          </div>
         </div>
       )}
 
-      {githubConnection && <div className="repo-list"><h3>GitHub repositories</h3>{githubLoading ? <p>Loading repositories…</p> : githubRepos.map((r) => <div key={r.id} className="repo-row" onClick={() => importSelectedGitHub(r)}><span>{r.fullName}</span><span className="status-tag ready">{r.defaultBranch}{r.private ? " · private" : ""}</span></div>)}</div>}
+      <header className="hero">
+        <img className="hero-logo" src="/icon.svg" alt="Codescape" width={80} height={80} />
+        <h1 className="hero-title">Codescape</h1>
+        <p className="hero-tagline">An explorable atlas of any codebase.</p>
+        <p className="hero-overview">
+          Upload a repository and Codescape maps it into a navigable system model — zoom from
+          high-level capabilities down through files and functions to the source itself,
+          like an atlas that goes from continents to streets.
+        </p>
+        <ul className="hero-chips">
+          <li>🧩 Concept → File → Function</li>
+          <li>🌐 3D &amp; 2D views</li>
+          <li>◎ Source-linked</li>
+          <li>✦ AI-named layers</li>
+        </ul>
+      </header>
+
+      {error && <div className="landing-error" role="alert">{error}</div>}
+
+      <div className="action-grid">
+        {/* Upload card */}
+        <section
+          className={`action-card dropzone${dragOver ? " dragover" : ""}${uploading ? " busy" : ""}`}
+          onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            const file = e.dataTransfer.files[0];
+            if (file) handleFile(file);
+          }}
+        >
+          {uploading ? (
+            <div className="card-body center">
+              <div className="spinner" aria-hidden="true" />
+              <p className="card-title">Analyzing repository…</p>
+              <p className="card-sub">Parsing files, building the graph, and mapping capabilities.</p>
+            </div>
+          ) : (
+            <div className="card-body center">
+              <div className="card-icon">⬆</div>
+              <p className="card-title">Upload a .zip</p>
+              <p className="card-sub">Drag &amp; drop a repository archive, or browse for one.</p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".zip"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleFile(file);
+                }}
+              />
+              <button type="button" className="btn-primary" onClick={() => fileInputRef.current?.click()}>
+                Choose file
+              </button>
+            </div>
+          )}
+        </section>
+
+        {/* GitHub card */}
+        <section className="action-card github-card">
+          {githubConnection ? (
+            <div className="card-body">
+              <div className="card-head">
+                <span className="card-title">Your GitHub repositories</span>
+                <span className="badge-connected">● connected</span>
+              </div>
+              {githubLoading ? (
+                <p className="card-sub">Loading repositories…</p>
+              ) : githubRepos.length === 0 ? (
+                <p className="card-sub">No repositories found for this account.</p>
+              ) : (
+                <ul className="gh-repo-list">
+                  {githubRepos.map((r) => (
+                    <li key={r.id} className="gh-repo" onClick={() => importSelectedGitHub(r)}>
+                      <span className="gh-repo-name">{r.fullName}</span>
+                      <span className="gh-repo-meta">{r.defaultBranch}{r.private ? " · private" : ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div className="card-body center">
+              <div className="card-icon">⎇</div>
+              <p className="card-title">Connect GitHub</p>
+              <p className="card-sub">Import a public or private repository straight from your account.</p>
+              <a className="btn-primary" href={githubConnectUrl}>Connect GitHub</a>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {repos.length > 0 && (
+        <section className="recent-section">
+          <h2 className="section-label">Previously analyzed</h2>
+          <div className="recent-grid">
+            {repos.map((r) => (
+              <button key={r.id} type="button" className="recent-card" onClick={() => openRepo(r)} disabled={r.status !== "ready"}>
+                <span className="recent-icon" data-origin={r.origin?.kind ?? "zip"}>{r.origin?.kind === "github" ? "⎇" : "⬆"}</span>
+                <span className="recent-body">
+                  <span className="recent-name">{r.name}</span>
+                  <span className={`status-tag ${r.status}`}>{r.status}</span>
+                </span>
+                {r.origin?.kind === "github" && (
+                  <span
+                    className="row-btn"
+                    role="button"
+                    tabIndex={0}
+                    title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
+                    onClick={(e) => { e.stopPropagation(); reimport(r); }}
+                  >
+                    ↻
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <footer className="landing-footer">
+        <a href="https://github.com/Ntsinga/Codescape" target="_blank" rel="noreferrer">Codescape on GitHub</a>
+      </footer>
     </div>
   );
 }

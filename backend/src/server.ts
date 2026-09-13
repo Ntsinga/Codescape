@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import swaggerUi from "swagger-ui-express";
+import { openApiSpec } from "./openapi.js";
 import { ensureDataDirs } from "./storage/paths.js";
 import { ensureMigrated } from "./graph/db.js";
 import { uploadRouter } from "./routes/upload.js";
@@ -20,6 +22,35 @@ async function main() {
   app.use(express.json());
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+  // Interactive API docs (Swagger UI) + raw spec.
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, { customSiteTitle: "Codescape API" }));
+  app.get("/api/openapi.json", (_req, res) => res.json(openApiSpec));
+
+  // Friendly root so hitting the backend URL directly isn't a bare "Cannot GET /".
+  const apiIndex = {
+    service: "codescape-backend",
+    status: "ok",
+    docs: "/api/docs",
+    openapi: "/api/openapi.json",
+    endpoints: [
+      "GET  /api/health",
+      "GET  /api/repos",
+      "POST /api/repos            (multipart zip upload)",
+      "GET  /api/repos/:id/graph",
+      "GET  /api/repos/:id/semantic",
+      "POST /api/repos/:id/decompose",
+      "GET  /api/repos/:id/source?path=",
+      "GET  /api/repos/:id/stack",
+      "POST /api/repos/:id/nodes/:nodeId/explain",
+      "GET  /api/ai/models",
+      "GET  /api/github/connect",
+      "GET  /api/docs            (Swagger UI)",
+    ],
+    repo: "https://github.com/Ntsinga/Codescape",
+  };
+  app.get("/", (_req, res) => res.json(apiIndex));
+  app.get("/api", (_req, res) => res.json(apiIndex));
 
   app.use("/api", uploadRouter);
   app.use("/api", reposRouter);

@@ -4,13 +4,46 @@ import type { ArchitectureResult, DiagramResult, ExplainResult, GitHubRepo, Grap
 // it stays "/api" and Vite's proxy (vite.config.ts) forwards it to localhost:4000.
 const BASE = `${import.meta.env.VITE_API_BASE ?? ""}/api`;
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * On a free hosting tier the backend sleeps after ~15 min idle and takes 30-60s
+ * to wake; during that window requests fail at the network layer (a `fetch`
+ * TypeError, surfaced in the browser as a CORS error because the 502 wake-up page
+ * carries no CORS headers). We retry those transient network failures a few times
+ * so a cold start is a short wait, not an error.
+ */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Request failed: ${res.status}`);
+  const url = `${BASE}${path}`;
+  const maxNetworkRetries = 4;
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      // Network-level failure (server asleep / unreachable). Retry with backoff.
+      if (attempt < maxNetworkRetries) {
+        await sleep(1500 + attempt * 2000);
+        continue;
+      }
+      throw new Error("Can't reach the server. It may be waking up (free tier can take ~30-60s) — please try again in a moment.");
+    }
+    // A 502/503 during wake-up: retry a couple of times before giving up.
+    if ((res.status === 502 || res.status === 503) && attempt < maxNetworkRetries) {
+      await sleep(1500 + attempt * 2000);
+      continue;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(body.error ?? `Request failed: ${res.status}`);
+    }
+    return res.json() as Promise<T>;
   }
-  return res.json() as Promise<T>;
+}
+
+/** Wakes the backend (fire-and-forget) so it's warm by the time the user acts. */
+export function warmup(): void {
+  fetch(`${BASE}/health`).catch(() => undefined);
 }
 
 export async function uploadRepo(file: File, name: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
