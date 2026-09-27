@@ -43,6 +43,16 @@ async function migrate(): Promise<void> {
       origin_branch TEXT,
       user_id TEXT
     );
+    -- CREATE TABLE IF NOT EXISTS never adds columns to an existing table, so
+    -- databases created before a column existed need it added explicitly
+    -- (otherwise the index below fails on "column does not exist").
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS semantic_json TEXT;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS semantic_enriched BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS origin_kind TEXT;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS origin_owner TEXT;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS origin_repo TEXT;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS origin_branch TEXT;
+    ALTER TABLE repos ADD COLUMN IF NOT EXISTS user_id TEXT;
     CREATE INDEX IF NOT EXISTS idx_repos_user ON repos(user_id);
 
     CREATE TABLE IF NOT EXISTS files (
