@@ -5,7 +5,7 @@ import { extractZip } from "./extractZip.js";
 import { detectLanguageByExtension } from "./detectLanguage.js";
 import { isSecretLike, limits } from "./ignoreRules.js";
 import { repoSourceDir, repoStorageDir } from "../storage/paths.js";
-import { parseFile } from "../parsing/parseFile.js";
+import { ParseWorker } from "../parsing/parseWorkerClient.js";
 import { buildGraph, type FileInput } from "../graph/buildGraph.js";
 import { buildSemanticTree, addSubgroups, buildFileAdjacency } from "../graph/semantic.js";
 import {
@@ -135,6 +135,10 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
   if (options.origin) await setRepoOrigin(repoId, options.origin);
 
   const destDir = repoSourceDir(repoId);
+  // Parsing runs in its own worker thread, terminated at the end of this import, so
+  // web-tree-sitter's WASM memory (which only grows, never shrinks) dies with it instead
+  // of permanently raising the main server process's memory floor. See parseWorkerClient.ts.
+  const parseWorker = new ParseWorker();
   try {
     logMem(`start (repo=${repoId})`);
     await fs.mkdir(destDir, { recursive: true });
@@ -181,17 +185,18 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
       }
 
       if (language !== "unknown") {
-        const parsed = await parseFile(file.relativePath, language, sourceText);
+        const parsed = await parseWorker.parseFile(file.relativePath, language, sourceText);
         if (parsed) parsedByPath.set(file.relativePath, parsed);
       }
 
-      // Periodically flush so we never hold the whole repo's contents at once, and check
-      // the memory budget on the same cadence so a too-large repo fails this one import
-      // instead of OOM-killing the process.
-      if (fileRecords.length >= 50 || contentsToStore.length >= 40) {
-        await flush();
-        assertMemoryBudget();
-      }
+      // Check the memory budget after every file, not just at flush time: tree-sitter's
+      // WASM arena can only grow, never shrink, and a single file's parse has been observed
+      // to jump RSS by 100MB+ regardless of that file's own size. Checking only every 40-50
+      // files left gaps wide enough for a real OOM kill to land between checks.
+      assertMemoryBudget();
+
+      // Periodically flush so we never hold the whole repo's contents at once.
+      if (fileRecords.length >= 50 || contentsToStore.length >= 40) await flush();
     }
 
     await flush();
@@ -217,6 +222,8 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
     await updateRepoStatus(repoId, "failed", err instanceof Error ? err.message : String(err));
     throw err;
   } finally {
+    // Reclaim the worker's WASM memory the moment this import ends, success or not.
+    await parseWorker.terminate().catch(() => undefined);
     await fs.unlink(zipPath).catch(() => undefined);
     // Postgres now holds everything needed to serve this repo; the local copy was
     // only ever scratch space for extraction + parsing.
