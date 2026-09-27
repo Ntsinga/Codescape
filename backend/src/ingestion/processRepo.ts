@@ -77,7 +77,37 @@ async function stripCommonPrefix<T extends { relativePath: string; absolutePath:
  * space only and is deleted once processing finishes, since the deployed
  * environment's disk is not persistent.
  */
-export async function processRepoZip(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
+let queueTail: Promise<void> = Promise.resolve();
+
+/** Bail out of an in-flight import before it drags the whole process past the container's
+ * memory limit — a graceful "failed" status for this one repo beats an OOM kill that takes
+ * down every other request the process is currently serving. */
+const MAX_INGEST_RSS_BYTES = Number(process.env.INGEST_MAX_RSS_BYTES) || 420 * 1024 * 1024; // headroom under the 512MB instance
+
+export function processRepoZip(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
+  // Serialize all imports/uploads: this runs as a single Node process (WEB_CONCURRENCY=1)
+  // on a 512MB instance, and each pipeline run (extraction, parsing, batched inserts) has
+  // its own peak memory cost. Two runs racing in the same heap — e.g. a duplicate request
+  // from a client retry — can OOM-kill the whole process even when either alone would fit.
+  // Queuing keeps that peak to one pipeline at a time regardless of how many requests land.
+  const run = queueTail.then(() => processRepoZipInner(zipPath, displayName, options));
+  queueTail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+function assertMemoryBudget(): void {
+  const rss = process.memoryUsage().rss;
+  if (rss > MAX_INGEST_RSS_BYTES) {
+    throw new Error(
+      `Repository is too large to process within the available memory (using ~${Math.round(rss / 1024 / 1024)}MB of a ~${Math.round(MAX_INGEST_RSS_BYTES / 1024 / 1024)}MB budget). Try a smaller repo, or a subdirectory of it.`
+    );
+  }
+}
+
+async function processRepoZipInner(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
   const isReplace = Boolean(options.repoId);
   const repoId = options.repoId ?? nanoid(12);
 
@@ -141,8 +171,13 @@ export async function processRepoZip(zipPath: string, displayName: string, optio
         if (parsed) parsedByPath.set(file.relativePath, parsed);
       }
 
-      // Periodically flush so we never hold the whole repo's contents at once.
-      if (fileRecords.length >= 50 || contentsToStore.length >= 40) await flush();
+      // Periodically flush so we never hold the whole repo's contents at once, and check
+      // the memory budget on the same cadence so a too-large repo fails this one import
+      // instead of OOM-killing the process.
+      if (fileRecords.length >= 50 || contentsToStore.length >= 40) {
+        await flush();
+        assertMemoryBudget();
+      }
     }
 
     await flush();
