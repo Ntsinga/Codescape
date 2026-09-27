@@ -53,7 +53,7 @@ async function main() {
       "GET  /api/repos/:id/stack",
       "POST /api/repos/:id/nodes/:nodeId/explain",
       "GET  /api/ai/models",
-      "GET  /api/github/connect",
+      "POST /api/github/connect-url",
       "GET  /api/docs            (Swagger UI)",
     ],
     repo: "https://github.com/Ntsinga/Codescape",
@@ -63,9 +63,9 @@ async function main() {
 
   // Each router below serves per-user data (repos, graph, source, AI actions), so
   // every route in them requires a signed-in Clerk user. githubRouter is the one
-  // exception: it gates each of its routes individually, because /github/connect
-  // and /github/callback are plain browser navigations (no Authorization header
-  // to check) rather than the frontend's authenticated fetch calls.
+  // exception: it gates each of its routes individually, because /github/callback
+  // is a plain browser navigation from GitHub (no Authorization header to check)
+  // rather than one of the frontend's authenticated fetch calls.
   app.use("/api", requireUser, uploadRouter);
   app.use("/api", requireUser, reposRouter);
   app.use("/api", requireUser, graphRouter);

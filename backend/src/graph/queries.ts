@@ -133,7 +133,7 @@ export async function setSetting(key: string, value: string): Promise<void> {
 
 // ---- GitHub OAuth (persisted so they survive backend restarts) ----
 
-/** state ties the CSRF check to the Clerk user who initiated /github/connect, so the callback (hit by GitHub, with no auth header of its own) knows who to save the token for. */
+/** state ties the CSRF check to the Clerk user who initiated /github/connect-url, so the callback (hit by GitHub, with no auth header of its own) knows who to save the token for. */
 export async function savePendingOAuthState(state: string, userId: string): Promise<void> {
   await getPool().query(`INSERT INTO github_oauth_state (state, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT (state) DO NOTHING`, [state, userId, new Date().toISOString()]);
 }

@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAuth } from "@clerk/clerk-react";
-import { ApiError, deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
+import { ApiError, deleteRepo, getGitHubConnectUrl, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 export function UploadView() {
-  const { getToken } = useAuth();
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // holds a status message while any load is in flight
   const uploading = busy !== null;
@@ -15,7 +13,7 @@ export function UploadView() {
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubLoading, setGithubLoading] = useState(false);
-  const [githubConnectHref, setGithubConnectHref] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<RepoSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadRepo = useExplorerStore((s) => s.loadRepo);
@@ -62,16 +60,19 @@ export function UploadView() {
     }
   }, [refreshRepos]);
 
-  // /github/connect is a plain <a href> navigation (not a fetch), so it can't carry
-  // an Authorization header — instead we hand it a short-lived Clerk session token
-  // as a query param, which the backend verifies once to learn who's connecting.
-  useEffect(() => {
-    getToken().then((token) => {
-      if (!token) return;
-      const base = `${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`;
-      setGithubConnectHref(`${base}?token=${encodeURIComponent(token)}`);
-    });
-  }, [getToken]);
+  // Ask the backend (authenticated fetch) for the GitHub authorize URL, then go
+  // straight to github.com — no session token ever appears in a URL.
+  async function connectGitHub() {
+    setConnecting(true);
+    setError(null);
+    try {
+      const { url } = await getGitHubConnectUrl();
+      window.location.assign(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't start GitHub sign-in");
+      setConnecting(false);
+    }
+  }
 
   async function importSelectedGitHub(repo: GitHubRepo) {
     if (!githubConnected) return;
@@ -249,14 +250,9 @@ export function UploadView() {
               {githubLoading ? (
                 <p className="card-sub">Checking your GitHub connection…</p>
               ) : (
-              <a
-                className="btn-primary"
-                href={githubConnectHref ?? "#"}
-                aria-disabled={!githubConnectHref}
-                onClick={(e) => { if (!githubConnectHref) e.preventDefault(); }}
-              >
-                Connect GitHub
-              </a>
+              <button type="button" className="btn-primary" onClick={connectGitHub} disabled={connecting}>
+                {connecting ? "Opening GitHub…" : "Connect GitHub"}
+              </button>
               )}
             </div>
           )}

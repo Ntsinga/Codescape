@@ -158,6 +158,10 @@ export function getRisks(repoId: string): Promise<RiskResult> { return request(`
 // GitHub connections are per-user server-side (keyed to the signed-in Clerk
 // user), so these no longer take a "connection" id — auth alone identifies it.
 export function listGitHubRepos(): Promise<GitHubRepo[]> { return request(`/github/repos`); }
+/** Starts GitHub OAuth; the caller navigates the browser to the returned github.com URL. */
+export function getGitHubConnectUrl(): Promise<{ url: string }> {
+  return request(`/github/connect-url`, { method: "POST" }, { retryable: false });
+}
 export function importGitHubRepo(fullName: string, branch: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
   const [owner, repo] = fullName.split("/");
   // Not retryable: see uploadRepo above — a duplicate retry means a second full

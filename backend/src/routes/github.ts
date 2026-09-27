@@ -5,7 +5,6 @@ import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import { verifyToken } from "@clerk/backend";
 import { processRepoZip } from "../ingestion/processRepo.js";
 import { uploadsTmpDir } from "../storage/paths.js";
 import { getRepoForUser, savePendingOAuthState, consumePendingOAuthState, saveGithubSession, getGithubSessionToken } from "../graph/queries.js";
@@ -23,30 +22,18 @@ function config() {
 }
 
 /**
- * Hit via a plain <a href> navigation (see frontend UploadView), not a fetch call,
- * so there's no Authorization header to read here — instead the frontend appends
- * the Clerk session token as ?token=, which we verify once up front. From here on,
- * the CSRF `state` we already generate carries the resulting userId through to
- * /github/callback (which GitHub redirects to with no auth of its own attached).
+ * Starts GitHub OAuth. Called with fetch (so the Clerk session travels in the
+ * Authorization header like every other API call) and returns the GitHub
+ * authorize URL; the browser then navigates straight to github.com. The CSRF
+ * `state` carries the userId through to /github/callback, which GitHub hits
+ * with no auth of its own. No session token ever appears in a URL.
  */
-githubRouter.get("/github/connect", async (req, res) => {
+githubRouter.post("/github/connect-url", requireUser, async (req, res) => {
   try {
-    const rawToken = String(req.query.token ?? "");
-    if (!rawToken) { failToApp(res, "Sign in first, then click Connect GitHub again."); return; }
-    const secretKey = process.env.CLERK_SECRET_KEY;
-    if (!secretKey) { res.status(500).json({ error: "CLERK_SECRET_KEY is not configured" }); return; }
-    let userId: string;
-    try {
-      const claims = await verifyToken(rawToken, { secretKey });
-      userId = claims.sub;
-    } catch {
-      failToApp(res, "Your session expired. Please sign in again and retry.");
-      return;
-    }
-
+    const { userId } = getAuth(req);
     const { clientId } = config();
     const state = crypto.randomBytes(24).toString("hex");
-    await savePendingOAuthState(state, userId);
+    await savePendingOAuthState(state, userId!);
     const callback = process.env.GITHUB_CALLBACK_URL ?? "http://localhost:4000/api/github/callback";
     const url = new URL("https://github.com/login/oauth/authorize");
     url.searchParams.set("client_id", clientId);
@@ -54,7 +41,7 @@ githubRouter.get("/github/connect", async (req, res) => {
     // `repo` is required for importing private repositories the user explicitly authorizes.
     url.searchParams.set("scope", "repo read:org");
     url.searchParams.set("state", state);
-    res.redirect(url.toString());
+    res.json({ url: url.toString() });
   } catch (err) { res.status(500).json({ error: err instanceof Error ? err.message : "GitHub OAuth is not configured" }); }
 });
 
