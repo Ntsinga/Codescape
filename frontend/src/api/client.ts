@@ -31,6 +31,13 @@ export function setAuthTokenGetter(fn: (() => Promise<string | null>) | null): v
  * concurrently with the first one, in the same process. Pass `retryable: false`
  * for those so a slow/erroring attempt fails fast instead of piling up duplicates.
  */
+/** An error response from the API, with its HTTP status so callers can branch on it. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit, opts: { retryable?: boolean } = {}): Promise<T> {
   const url = `${BASE}${path}`;
   const maxNetworkRetries = opts.retryable === false ? 0 : 4;
@@ -57,7 +64,7 @@ async function request<T>(path: string, init?: RequestInit, opts: { retryable?: 
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(body.error ?? `Request failed: ${res.status}`);
+      throw new ApiError(body.error ?? `Request failed: ${res.status}`, res.status);
     }
     return res.json() as Promise<T>;
   }

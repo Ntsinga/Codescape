@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@clerk/clerk-react";
-import { deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
+import { ApiError, deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -47,6 +47,18 @@ export function UploadView() {
       setGithubLoading(true);
       listGitHubRepos().then(setGithubRepos).catch((err) => setError(err instanceof Error ? err.message : "Unable to list GitHub repositories")).finally(() => setGithubLoading(false));
       window.history.replaceState({}, "", window.location.pathname);
+    } else {
+      // The GitHub token is stored server-side per user, so a returning user is
+      // usually still connected — ask the server instead of showing the button.
+      setGithubLoading(true);
+      listGitHubRepos()
+        .then((repos) => { setGithubRepos(repos); setGithubConnected(true); })
+        .catch((err) => {
+          if (err instanceof ApiError && err.status === 401) return; // never connected: just show the button
+          if (err instanceof ApiError) setError("GitHub access has expired or was revoked — click “Connect GitHub” to reconnect.");
+          // Network errors (server waking up) stay quiet; the button remains available.
+        })
+        .finally(() => setGithubLoading(false));
     }
   }, [refreshRepos]);
 
@@ -234,6 +246,9 @@ export function UploadView() {
               <div className="card-icon">⎇</div>
               <p className="card-title">Connect GitHub</p>
               <p className="card-sub">Import a public or private repository straight from your account.</p>
+              {githubLoading ? (
+                <p className="card-sub">Checking your GitHub connection…</p>
+              ) : (
               <a
                 className="btn-primary"
                 href={githubConnectHref ?? "#"}
@@ -242,6 +257,7 @@ export function UploadView() {
               >
                 Connect GitHub
               </a>
+              )}
             </div>
           )}
         </section>
