@@ -15,13 +15,14 @@ export interface RepoRecord {
   status: "processing" | "ready" | "failed";
   error: string | null;
   origin: RepoOrigin;
+  userId: string | null;
 }
 
 export async function insertRepo(repo: RepoRecord): Promise<void> {
   await getPool().query(
-    `INSERT INTO repos (id, name, created_at, status, error, origin_kind, origin_owner, origin_repo, origin_branch)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [repo.id, repo.name, repo.createdAt, repo.status, repo.error, repo.origin.kind, repo.origin.owner, repo.origin.repo, repo.origin.branch]
+    `INSERT INTO repos (id, name, created_at, status, error, origin_kind, origin_owner, origin_repo, origin_branch, user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [repo.id, repo.name, repo.createdAt, repo.status, repo.error, repo.origin.kind, repo.origin.owner, repo.origin.repo, repo.origin.branch, repo.userId]
   );
 }
 
@@ -37,16 +38,24 @@ function rowToRepo(row: any): RepoRecord {
     status: row.status,
     error: row.error,
     origin: { kind: row.origin_kind ?? null, owner: row.origin_owner ?? null, repo: row.origin_repo ?? null, branch: row.origin_branch ?? null },
+    userId: row.user_id ?? null,
   };
 }
 
+/** Unscoped lookup — only for internal use (e.g. re-import, which already re-derives ownership from the caller's auth before calling this). Route handlers serving a client must use getRepoForUser instead. */
 export async function getRepo(id: string): Promise<RepoRecord | undefined> {
   const { rows } = await getPool().query(`SELECT * FROM repos WHERE id = $1`, [id]);
   return rows[0] ? rowToRepo(rows[0]) : undefined;
 }
 
-export async function listRepos(): Promise<RepoRecord[]> {
-  const { rows } = await getPool().query(`SELECT * FROM repos ORDER BY created_at DESC`);
+/** Returns the repo only if it belongs to this user; otherwise undefined (404, not 403 — avoids leaking existence of other users' repos). */
+export async function getRepoForUser(id: string, userId: string): Promise<RepoRecord | undefined> {
+  const { rows } = await getPool().query(`SELECT * FROM repos WHERE id = $1 AND user_id = $2`, [id, userId]);
+  return rows[0] ? rowToRepo(rows[0]) : undefined;
+}
+
+export async function listReposForUser(userId: string): Promise<RepoRecord[]> {
+  const { rows } = await getPool().query(`SELECT * FROM repos WHERE user_id = $1 ORDER BY created_at DESC`, [userId]);
   return rows.map(rowToRepo);
 }
 
@@ -90,6 +99,7 @@ export async function deleteRepo(id: string): Promise<void> {
     await client.query(`DELETE FROM edges WHERE repo_id = $1`, [id]);
     await client.query(`DELETE FROM files WHERE repo_id = $1`, [id]);
     await client.query(`DELETE FROM file_contents WHERE repo_id = $1`, [id]);
+    await client.query(`DELETE FROM repo_history WHERE repo_id = $1`, [id]);
     await client.query(`DELETE FROM repos WHERE id = $1`, [id]);
     await client.query("COMMIT");
   } catch (err) {
@@ -123,27 +133,28 @@ export async function setSetting(key: string, value: string): Promise<void> {
 
 // ---- GitHub OAuth (persisted so they survive backend restarts) ----
 
-export async function savePendingOAuthState(state: string): Promise<void> {
-  await getPool().query(`INSERT INTO github_oauth_state (state, created_at) VALUES ($1, $2) ON CONFLICT (state) DO NOTHING`, [state, new Date().toISOString()]);
+/** state ties the CSRF check to the Clerk user who initiated /github/connect, so the callback (hit by GitHub, with no auth header of its own) knows who to save the token for. */
+export async function savePendingOAuthState(state: string, userId: string): Promise<void> {
+  await getPool().query(`INSERT INTO github_oauth_state (state, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT (state) DO NOTHING`, [state, userId, new Date().toISOString()]);
 }
 
-/** Returns the state's creation time and deletes it (single-use); null if unknown. */
-export async function consumePendingOAuthState(state: string): Promise<Date | null> {
-  const { rows } = await getPool().query(`DELETE FROM github_oauth_state WHERE state = $1 RETURNING created_at`, [state]);
-  return rows[0] ? new Date(rows[0].created_at) : null;
+/** Returns the state's creation time + owning user and deletes it (single-use); null if unknown. */
+export async function consumePendingOAuthState(state: string): Promise<{ createdAt: Date; userId: string } | null> {
+  const { rows } = await getPool().query(`DELETE FROM github_oauth_state WHERE state = $1 RETURNING created_at, user_id`, [state]);
+  return rows[0] ? { createdAt: new Date(rows[0].created_at), userId: rows[0].user_id } : null;
 }
 
-export async function saveGithubSession(connection: string, token: string): Promise<void> {
-  await getPool().query(`INSERT INTO github_sessions (connection, token, created_at) VALUES ($1, $2, $3) ON CONFLICT (connection) DO UPDATE SET token = excluded.token`, [
-    connection,
+export async function saveGithubSession(userId: string, token: string): Promise<void> {
+  await getPool().query(`INSERT INTO github_sessions (user_id, token, created_at) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET token = excluded.token`, [
+    userId,
     token,
     new Date().toISOString(),
   ]);
 }
 
-export async function getGithubSessionToken(connection: string): Promise<string | null> {
-  if (!connection) return null;
-  const { rows } = await getPool().query(`SELECT token FROM github_sessions WHERE connection = $1`, [connection]);
+export async function getGithubSessionToken(userId: string): Promise<string | null> {
+  if (!userId) return null;
+  const { rows } = await getPool().query(`SELECT token FROM github_sessions WHERE user_id = $1`, [userId]);
   return rows[0] ? rows[0].token : null;
 }
 
@@ -194,6 +205,15 @@ export async function getFileContent(repoId: string, filePath: string): Promise<
 export async function listFileContentPaths(repoId: string, pathSuffix: RegExp): Promise<Array<{ path: string; content: string }>> {
   const { rows } = await getPool().query(`SELECT path, content FROM file_contents WHERE repo_id = $1`, [repoId]);
   return rows.filter((r: any) => pathSuffix.test(r.path));
+}
+
+/** Fetches the contents of specific files only (avoids loading a whole repo into memory). */
+export async function getFileContentsByPaths(repoId: string, paths: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (paths.length === 0) return out;
+  const { rows } = await getPool().query(`SELECT path, content FROM file_contents WHERE repo_id = $1 AND path = ANY($2)`, [repoId, paths]);
+  for (const r of rows as Array<{ path: string; content: string }>) out.set(r.path, r.content);
+  return out;
 }
 
 /** Generic multi-row INSERT batching (Postgres has no prepared-statement transaction helper like better-sqlite3's). */

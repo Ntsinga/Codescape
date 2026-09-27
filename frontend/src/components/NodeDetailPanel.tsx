@@ -8,6 +8,7 @@ export function NodeDetailPanel() {
   const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
   const nodesById = useExplorerStore((s) => s.nodesById);
   const edges = useExplorerStore((s) => s.edges);
+  const links = useExplorerStore((s) => s.links);
   const selectNode = useExplorerStore((s) => s.selectNode);
   const setViewMode = useExplorerStore((s) => s.setViewMode);
   const setFocusNode = useExplorerStore((s) => s.setFocusNode);
@@ -36,6 +37,15 @@ export function NodeDetailPanel() {
       incoming: edges.filter((e) => e.toNodeId === node.id),
     };
   }, [edges, node]);
+
+  // Map layer: aggregated dependencies (imports + calls rolled up to this node's level).
+  const { dependsOn, usedBy } = useMemo(() => {
+    if (!node) return { dependsOn: [], usedBy: [] };
+    return {
+      dependsOn: links.filter((l) => l.from === node.id).sort((a, b) => b.weight - a.weight),
+      usedBy: links.filter((l) => l.to === node.id).sort((a, b) => b.weight - a.weight),
+    };
+  }, [links, node]);
 
   if (!node) {
     return (
@@ -154,6 +164,42 @@ export function NodeDetailPanel() {
           <ul className="edge-list">{impact.impacted.map((item) => <li key={item.node.id} onClick={() => selectNode(item.node.id)}>{item.node.name}<span className="confidence-tag">depth {item.depth}</span></li>)}</ul>
         </>}
       </section>}
+
+      {dependsOn.length > 0 && (
+        <section>
+          <h3>Depends on ({dependsOn.length})</h3>
+          <ul className="edge-list">
+            {dependsOn.map((l) => {
+              const target = nodesById.get(l.to);
+              if (!target) return null;
+              return (
+                <li key={`${l.from}>${l.to}`} onClick={() => selectNode(target.id)}>
+                  {target.name}
+                  <span className="confidence-tag">{l.imports} imports · {l.calls} calls</span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
+      {usedBy.length > 0 && (
+        <section>
+          <h3>Used by ({usedBy.length})</h3>
+          <ul className="edge-list">
+            {usedBy.map((l) => {
+              const source = nodesById.get(l.from);
+              if (!source) return null;
+              return (
+                <li key={`${l.from}>${l.to}`} onClick={() => selectNode(source.id)}>
+                  {source.name}
+                  <span className="confidence-tag">{l.weight} refs</span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
 
       {outgoing.length > 0 && (
         <section>

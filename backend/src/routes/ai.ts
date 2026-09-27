@@ -1,8 +1,10 @@
 import { Router } from "express";
-import { getRepo, getNode, getEdgesForNode, getAllNodes, getAllEdges, getFileContent } from "../graph/queries.js";
+import { getRepoForUser, getNode, getEdgesForNode, getAllNodes, getAllEdges, getFileContent } from "../graph/queries.js";
 import { isSecretLike } from "../ingestion/ignoreRules.js";
 import { explainNode, analyzeArchitecture } from "../ai/openai.js";
 import { availableProviders, getSelection, setSelection, listModels, type ProviderName } from "../ai/provider.js";
+import { getAuth } from "../auth.js";
+import { computeRisks } from "../graph/risk.js";
 
 export const aiRouter = Router();
 
@@ -52,7 +54,7 @@ async function readSnippet(repoId: string, filePath: string, startLine: number, 
 
 aiRouter.post("/repos/:id/nodes/:nodeId/explain", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const repo = await getRepoForUser(req.params.id, getAuth(req).userId!);
     if (!repo) {
       res.status(404).json({ error: "Repository not found" });
       return;
@@ -100,7 +102,7 @@ aiRouter.post("/repos/:id/nodes/:nodeId/explain", async (req, res) => {
 
 aiRouter.post("/repos/:id/analyze", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const repo = await getRepoForUser(req.params.id, getAuth(req).userId!);
     if (!repo) { res.status(404).json({ error: "Repository not found" }); return; }
     if (repo.status !== "ready") { res.status(409).json({ error: `Repository is ${repo.status}` }); return; }
     const result = await analyzeArchitecture({ repoName: repo.name, nodes: await getAllNodes(repo.id), edges: await getAllEdges(repo.id) });
@@ -112,7 +114,7 @@ aiRouter.post("/repos/:id/analyze", async (req, res) => {
 
 aiRouter.get("/repos/:id/diagrams", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const repo = await getRepoForUser(req.params.id, getAuth(req).userId!);
     if (!repo) { res.status(404).json({ error: "Repository not found" }); return; }
     const nodes = await getAllNodes(repo.id);
     const edges = await getAllEdges(repo.id);
@@ -131,17 +133,15 @@ aiRouter.get("/repos/:id/diagrams", async (req, res) => {
 
 aiRouter.get("/repos/:id/risks", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const repo = await getRepoForUser(req.params.id, getAuth(req).userId!);
     if (!repo) { res.status(404).json({ error: "Repository not found" }); return; }
     const nodes = await getAllNodes(repo.id);
     const edges = await getAllEdges(repo.id);
-    const risks = nodes.filter((n) => n.filePath && n.startLine !== null && n.endLine !== null).map((node) => {
-      const incoming = edges.filter((e) => e.toNodeId === node.id && ["Calls", "Imports"].includes(e.type)).length;
-      const outgoing = edges.filter((e) => e.fromNodeId === node.id && ["Calls", "Imports"].includes(e.type)).length;
-      const lines = (node.endLine ?? 0) - (node.startLine ?? 0) + 1;
-      const score = Math.min(100, incoming * 8 + outgoing * 4 + Math.max(0, lines - 40));
-      return { node, score, reasons: [incoming > 2 ? `${incoming} incoming dependencies` : null, outgoing > 4 ? `${outgoing} outgoing dependencies` : null, lines > 80 ? `${lines} source lines` : null].filter(Boolean) };
-    }).filter((r) => r.score >= 20).sort((a, b) => b.score - a.score).slice(0, 50);
+    const scores = computeRisks(nodes, edges);
+    const risks = nodes
+      .filter((n) => scores.has(n.id))
+      .map((node) => ({ node, ...scores.get(node.id)! }))
+      .filter((r) => r.score >= 20).sort((a, b) => b.score - a.score).slice(0, 50);
     res.json({ risks, policy: "Deterministic baseline score; review with source evidence before acting." });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to compute risks" });

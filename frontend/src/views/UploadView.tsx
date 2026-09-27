@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAuth } from "@clerk/clerk-react";
 import { deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
 export function UploadView() {
+  const { getToken } = useAuth();
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // holds a status message while any load is in flight
   const uploading = busy !== null;
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<RepoSummary[]>([]);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
-  const [githubConnection, setGithubConnection] = useState<string | null>(null);
+  const [githubConnected, setGithubConnected] = useState(false);
   const [githubLoading, setGithubLoading] = useState(false);
+  const [githubConnectHref, setGithubConnectHref] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<RepoSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadRepo = useExplorerStore((s) => s.loadRepo);
@@ -36,23 +39,33 @@ export function UploadView() {
     warmup(); // nudge the backend awake so the first real action isn't a cold start
     refreshRepos();
     const params = new URLSearchParams(window.location.search);
-    const connection = params.get("connection");
     if (params.get("github") === "error") {
       setError(params.get("message") || "GitHub connection failed.");
       window.history.replaceState({}, "", window.location.pathname);
-    } else if (params.get("github") === "connected" && connection) {
-      setGithubConnection(connection);
+    } else if (params.get("github") === "connected") {
+      setGithubConnected(true);
       setGithubLoading(true);
-      listGitHubRepos(connection).then(setGithubRepos).catch((err) => setError(err instanceof Error ? err.message : "Unable to list GitHub repositories")).finally(() => setGithubLoading(false));
+      listGitHubRepos().then(setGithubRepos).catch((err) => setError(err instanceof Error ? err.message : "Unable to list GitHub repositories")).finally(() => setGithubLoading(false));
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, [refreshRepos]);
 
+  // /github/connect is a plain <a href> navigation (not a fetch), so it can't carry
+  // an Authorization header — instead we hand it a short-lived Clerk session token
+  // as a query param, which the backend verifies once to learn who's connecting.
+  useEffect(() => {
+    getToken().then((token) => {
+      if (!token) return;
+      const base = `${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`;
+      setGithubConnectHref(`${base}?token=${encodeURIComponent(token)}`);
+    });
+  }, [getToken]);
+
   async function importSelectedGitHub(repo: GitHubRepo) {
-    if (!githubConnection) return;
+    if (!githubConnected) return;
     setBusy(`Importing ${repo.fullName}…`); setError(null);
     try {
-      const result = await importGitHubRepo(githubConnection, repo.fullName, repo.defaultBranch);
+      const result = await importGitHubRepo(repo.fullName, repo.defaultBranch);
       await openLoaded(result.repoId, repo.fullName);
     } catch (err) { setError(err instanceof Error ? err.message : "GitHub import failed"); setBusy(null); refreshRepos(); }
   }
@@ -74,14 +87,14 @@ export function UploadView() {
   );
 
   async function reimport(repo: RepoSummary) {
-    if (!githubConnection) {
+    if (!githubConnected) {
       setError("Connect GitHub first to re-import (click “Connect GitHub”).");
       return;
     }
     setBusy(`Re-importing ${repo.name}…`);
     setError(null);
     try {
-      await reimportGitHubRepo(githubConnection, repo.id);
+      await reimportGitHubRepo(repo.id);
       await openLoaded(repo.id, repo.name);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Re-import failed");
@@ -129,20 +142,9 @@ export function UploadView() {
     [openLoaded, refreshRepos]
   );
 
-  const githubConnectUrl = `${import.meta.env.VITE_API_BASE ?? ""}/api/github/connect`;
-
   return (
     <div className="landing">
       <div className="landing-glow" aria-hidden="true" />
-
-      {busy && (
-        <div className="loading-overlay" role="status" aria-live="polite">
-          <div className="loading-card">
-            <div className="spinner large" aria-hidden="true" />
-            <p className="loading-msg">{busy}</p>
-          </div>
-        </div>
-      )}
 
       <header className="hero">
         <img className="hero-logo" src="/icon.svg" alt="Codescape" width={80} height={80} />
@@ -177,9 +179,9 @@ export function UploadView() {
           }}
         >
           {uploading ? (
-            <div className="card-body center">
+            <div className="card-body center" role="status" aria-live="polite">
               <div className="spinner" aria-hidden="true" />
-              <p className="card-title">Analyzing repository…</p>
+              <p className="card-title">{busy}</p>
               <p className="card-sub">Parsing files, building the graph, and mapping capabilities.</p>
             </div>
           ) : (
@@ -206,7 +208,7 @@ export function UploadView() {
 
         {/* GitHub card */}
         <section className="action-card github-card">
-          {githubConnection ? (
+          {githubConnected ? (
             <div className="card-body">
               <div className="card-head">
                 <span className="card-title">Your GitHub repositories</span>
@@ -232,7 +234,14 @@ export function UploadView() {
               <div className="card-icon">⎇</div>
               <p className="card-title">Connect GitHub</p>
               <p className="card-sub">Import a public or private repository straight from your account.</p>
-              <a className="btn-primary" href={githubConnectUrl}>Connect GitHub</a>
+              <a
+                className="btn-primary"
+                href={githubConnectHref ?? "#"}
+                aria-disabled={!githubConnectHref}
+                onClick={(e) => { if (!githubConnectHref) e.preventDefault(); }}
+              >
+                Connect GitHub
+              </a>
             </div>
           )}
         </section>
@@ -261,7 +270,7 @@ export function UploadView() {
                     <button
                       type="button"
                       className="row-btn"
-                      title={githubConnection ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
+                      title={githubConnected ? "Re-fetch latest from GitHub (replaces in place)" : "Connect GitHub to re-import"}
                       onClick={(e) => { e.stopPropagation(); reimport(r); }}
                     >
                       ↻

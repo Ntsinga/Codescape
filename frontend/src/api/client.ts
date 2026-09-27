@@ -1,10 +1,21 @@
-import type { ArchitectureResult, DiagramResult, ExplainResult, GitHubRepo, GraphEdge, GraphNode, ImpactResult, RepoSummary, RiskResult, SemanticTree, StackResult } from "./types";
+import type { ArchitectureResult, DiagramResult, ExplainResult, FlowResult, GitHubRepo, GraphEdge, GraphNode, HistoryResult, ImpactResult, RepoSummary, RiskResult, SemanticTree, StackResult, WhyResult } from "./types";
 
 // In production this points at the deployed backend (set at build time); in dev
 // it stays "/api" and Vite's proxy (vite.config.ts) forwards it to localhost:4000.
 const BASE = `${import.meta.env.VITE_API_BASE ?? ""}/api`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Set once from a component inside <ClerkProvider> (see App.tsx) so this plain
+ * module — which has no access to React hooks — can still attach the signed-in
+ * user's session token to every request. The backend verifies it per-request;
+ * nothing here is trusted client-side.
+ */
+let getAuthToken: (() => Promise<string | null>) | null = null;
+export function setAuthTokenGetter(fn: (() => Promise<string | null>) | null): void {
+  getAuthToken = fn;
+}
 
 /**
  * On a free hosting tier the backend sleeps after ~15 min idle and takes 30-60s
@@ -23,10 +34,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function request<T>(path: string, init?: RequestInit, opts: { retryable?: boolean } = {}): Promise<T> {
   const url = `${BASE}${path}`;
   const maxNetworkRetries = opts.retryable === false ? 0 : 4;
+  const token = await getAuthToken?.().catch(() => null);
+  const authedInit: RequestInit = token
+    ? { ...init, headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` } }
+    : init ?? {};
   for (let attempt = 0; ; attempt++) {
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await fetch(url, authedInit);
     } catch (err) {
       // Network-level failure (server asleep / unreachable). Retry with backoff.
       if (attempt < maxNetworkRetries) {
@@ -121,22 +136,34 @@ export function getStack(repoId: string): Promise<StackResult> { return request(
 export function decomposeRepository(repoId: string, enrich = true): Promise<SemanticTree> {
   return request(`/repos/${repoId}/decompose?enrich=${enrich}`, { method: "POST" });
 }
+export function getFlow(repoId: string, entrypointId: string): Promise<FlowResult> {
+  return request(`/repos/${repoId}/flows/${encodeURIComponent(entrypointId)}`);
+}
+export function explainWhy(repoId: string, semanticNodeId: string): Promise<WhyResult> {
+  return request(`/repos/${repoId}/semantic/${encodeURIComponent(semanticNodeId)}/explain`, { method: "POST" });
+}
+export function getHistory(repoId: string): Promise<HistoryResult> { return request(`/repos/${repoId}/history`); }
+export function collectHistory(repoId: string): Promise<{ ok: true }> {
+  return request(`/github/history`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repoId }) });
+}
 export function getDiagrams(repoId: string): Promise<DiagramResult> { return request(`/repos/${repoId}/diagrams`); }
 export function getRisks(repoId: string): Promise<RiskResult> { return request(`/repos/${repoId}/risks`); }
-export function listGitHubRepos(connection: string): Promise<GitHubRepo[]> { return request(`/github/repos?connection=${encodeURIComponent(connection)}`); }
-export function importGitHubRepo(connection: string, fullName: string, branch: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
+// GitHub connections are per-user server-side (keyed to the signed-in Clerk
+// user), so these no longer take a "connection" id — auth alone identifies it.
+export function listGitHubRepos(): Promise<GitHubRepo[]> { return request(`/github/repos`); }
+export function importGitHubRepo(fullName: string, branch: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
   const [owner, repo] = fullName.split("/");
   // Not retryable: see uploadRepo above — a duplicate retry means a second full
   // import pipeline running concurrently with the first in the same 512MB process.
   return request(
-    `/github/import?connection=${encodeURIComponent(connection)}`,
+    `/github/import`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, repo, branch }) },
     { retryable: false }
   );
 }
-export function reimportGitHubRepo(connection: string, repoId: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
+export function reimportGitHubRepo(repoId: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
   return request(
-    `/github/reimport?connection=${encodeURIComponent(connection)}`,
+    `/github/reimport`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repoId }) },
     { retryable: false }
   );

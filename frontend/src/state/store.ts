@@ -1,8 +1,9 @@
 import { create } from "zustand";
-import type { GraphEdge, GraphNode, SemanticNode } from "../api/types";
+import type { Archetype, EntryPoint, FlowResult, GraphEdge, GraphNode, HistoryResult, NodeMetrics, SemanticLink, SemanticNode, SemanticTree } from "../api/types";
 
 export type ViewMode = "3d" | "2d" | "source";
 export type Layer = "semantic" | "files";
+export type Overlay = "none" | "health";
 
 /** Unified node the explorer UI renders, mapped from either graph layer. */
 export interface ExplorerNode {
@@ -23,6 +24,12 @@ export interface ExplorerNode {
   role?: string | null;
   confidence?: number;
   source?: string;
+  // Architecture pass extras (semantic layer only):
+  archetype?: Archetype;
+  layerArchetype?: Archetype;
+  layer?: number | null;
+  metrics?: NodeMetrics;
+  architecturalKind?: Archetype | null;
 }
 
 function fromGraphNode(n: GraphNode): ExplorerNode {
@@ -56,13 +63,26 @@ function fromSemanticNode(n: SemanticNode): ExplorerNode {
     role: n.role,
     confidence: n.confidence,
     source: n.source,
+    archetype: n.archetype,
+    layerArchetype: n.layerArchetype,
+    layer: n.layer,
+    metrics: n.metrics,
+    architecturalKind: n.architecturalKind,
   };
 }
 
 interface LayerData {
   nodes: ExplorerNode[];
   edges: GraphEdge[];
+  /** Aggregated semantic dependencies (Map layer only). */
+  links: SemanticLink[];
+  entrypoints: EntryPoint[];
   rootId: string | null;
+}
+
+function semanticLayerOf(tree: SemanticTree | null): LayerData {
+  const nodes = tree ? tree.nodes.map(fromSemanticNode) : [];
+  return { nodes, edges: [], links: tree?.links ?? [], entrypoints: tree?.entrypoints ?? [], rootId: rootOf(nodes) };
 }
 
 interface ExplorerState {
@@ -74,6 +94,8 @@ interface ExplorerState {
   // Active-layer views (kept name-compatible with existing components):
   nodes: ExplorerNode[];
   edges: GraphEdge[];
+  links: SemanticLink[];
+  entrypoints: EntryPoint[];
   nodesById: Map<string, ExplorerNode>;
   childrenByParent: Map<string | null, ExplorerNode[]>;
   focusNodeId: string | null;
@@ -82,6 +104,18 @@ interface ExplorerState {
 
   viewMode: ViewMode;
 
+  // 3D map interaction state
+  /** Where the last focus change came from (for the explode / collapse animation). */
+  focusFromId: string | null;
+  focusChangedAt: number;
+  /** Nodes lit up by "Why?" / Trace (everything else dims). */
+  highlight: { ids: string[]; label: string } | null;
+  flow: FlowResult | null;
+  overlay: Overlay;
+  history: HistoryResult | null;
+  /** Timeline position (ms since epoch); null = present day. */
+  timeCursor: number | null;
+
   // internal per-layer storage
   _layers: Record<Layer, LayerData>;
 
@@ -89,14 +123,19 @@ interface ExplorerState {
     repoId: string,
     repoName: string,
     physical: { nodes: GraphNode[]; edges: GraphEdge[] },
-    semantic: { nodes: SemanticNode[]; aiEnriched: boolean } | null
+    semantic: SemanticTree | null
   ) => void;
-  setSemantic: (semantic: { nodes: SemanticNode[]; aiEnriched: boolean }) => void;
+  setSemantic: (semantic: SemanticTree) => void;
   setLayer: (layer: Layer) => void;
   setFocusNode: (nodeId: string) => void;
   focusParent: () => void;
   selectNode: (nodeId: string | null) => void;
   setViewMode: (mode: ViewMode) => void;
+  setHighlight: (highlight: { ids: string[]; label: string } | null) => void;
+  setFlow: (flow: FlowResult | null) => void;
+  setOverlay: (overlay: Overlay) => void;
+  setHistory: (history: HistoryResult | null) => void;
+  setTimeCursor: (t: number | null) => void;
   reset: () => void;
 }
 
@@ -133,6 +172,8 @@ function activate(layerData: LayerData) {
   return {
     nodes: layerData.nodes,
     edges: layerData.edges,
+    links: layerData.links,
+    entrypoints: layerData.entrypoints,
     nodesById,
     childrenByParent,
     focusNodeId,
@@ -140,7 +181,9 @@ function activate(layerData: LayerData) {
   };
 }
 
-const emptyLayer: LayerData = { nodes: [], edges: [], rootId: null };
+const emptyLayer: LayerData = { nodes: [], edges: [], links: [], entrypoints: [], rootId: null };
+
+const clearedInteraction = { highlight: null, flow: null, focusFromId: null, focusChangedAt: 0 };
 
 export const useExplorerStore = create<ExplorerState>((set, get) => ({
   repoId: null,
@@ -149,21 +192,29 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
   aiEnriched: false,
   nodes: [],
   edges: [],
+  links: [],
+  entrypoints: [],
   nodesById: new Map(),
   childrenByParent: new Map(),
   focusNodeId: null,
   selectedNodeId: null,
   breadcrumb: [],
   viewMode: "3d",
+  focusFromId: null,
+  focusChangedAt: 0,
+  highlight: null,
+  flow: null,
+  overlay: "none",
+  history: null,
+  timeCursor: null,
   _layers: { semantic: emptyLayer, files: emptyLayer },
 
   loadRepo: (repoId, repoName, physical, semantic) => {
     const physicalNodes = physical.nodes.map(fromGraphNode);
-    const physicalLayer: LayerData = { nodes: physicalNodes, edges: physical.edges, rootId: rootOf(physicalNodes) };
-    const semanticNodes = semantic ? semantic.nodes.map(fromSemanticNode) : [];
-    const semanticLayer: LayerData = { nodes: semanticNodes, edges: [], rootId: rootOf(semanticNodes) };
+    const physicalLayer: LayerData = { nodes: physicalNodes, edges: physical.edges, links: [], entrypoints: [], rootId: rootOf(physicalNodes) };
+    const semanticLayer = semanticLayerOf(semantic);
 
-    const layer: Layer = semanticNodes.length > 0 ? "semantic" : "files";
+    const layer: Layer = semanticLayer.nodes.length > 0 ? "semantic" : "files";
     const active = activate(layer === "semantic" ? semanticLayer : physicalLayer);
 
     set({
@@ -173,28 +224,30 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
       aiEnriched: semantic?.aiEnriched ?? false,
       _layers: { semantic: semanticLayer, files: physicalLayer },
       selectedNodeId: null,
+      history: null,
+      timeCursor: null,
+      ...clearedInteraction,
       ...active,
     });
   },
 
   setSemantic: (semantic) => {
-    const semanticNodes = semantic.nodes.map(fromSemanticNode);
-    const semanticLayer: LayerData = { nodes: semanticNodes, edges: [], rootId: rootOf(semanticNodes) };
+    const semanticLayer = semanticLayerOf(semantic);
     const layers = { ...get()._layers, semantic: semanticLayer };
     const patch: Partial<ExplorerState> = { _layers: layers, aiEnriched: semantic.aiEnriched };
-    if (get().layer === "semantic") Object.assign(patch, activate(semanticLayer), { selectedNodeId: null });
+    if (get().layer === "semantic") Object.assign(patch, activate(semanticLayer), { selectedNodeId: null }, clearedInteraction);
     set(patch);
   },
 
   setLayer: (layer) => {
     const layerData = get()._layers[layer];
-    set({ layer, selectedNodeId: null, ...activate(layerData) });
+    set({ layer, selectedNodeId: null, ...clearedInteraction, ...activate(layerData) });
   },
 
   setFocusNode: (nodeId) => {
     const { nodesById } = get();
     if (!nodesById.has(nodeId)) return;
-    set({ focusNodeId: nodeId, breadcrumb: computeBreadcrumb(nodesById, nodeId) });
+    set({ focusNodeId: nodeId, breadcrumb: computeBreadcrumb(nodesById, nodeId), focusFromId: get().focusNodeId, focusChangedAt: performance.now() });
   },
 
   focusParent: () => {
@@ -202,11 +255,16 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     if (!focusNodeId) return;
     const current = nodesById.get(focusNodeId);
     if (!current || !current.parentId) return;
-    set({ focusNodeId: current.parentId, breadcrumb: computeBreadcrumb(nodesById, current.parentId) });
+    set({ focusNodeId: current.parentId, breadcrumb: computeBreadcrumb(nodesById, current.parentId), focusFromId: focusNodeId, focusChangedAt: performance.now() });
   },
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
   setViewMode: (mode) => set({ viewMode: mode }),
+  setHighlight: (highlight) => set({ highlight }),
+  setFlow: (flow) => set({ flow, highlight: null }),
+  setOverlay: (overlay) => set({ overlay }),
+  setHistory: (history) => set({ history }),
+  setTimeCursor: (timeCursor) => set({ timeCursor }),
 
   reset: () =>
     set({
@@ -216,11 +274,17 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
       aiEnriched: false,
       nodes: [],
       edges: [],
+      links: [],
+      entrypoints: [],
       nodesById: new Map(),
       childrenByParent: new Map(),
       focusNodeId: null,
       selectedNodeId: null,
       breadcrumb: [],
+      history: null,
+      timeCursor: null,
+      overlay: "none",
+      ...clearedInteraction,
       _layers: { semantic: emptyLayer, files: emptyLayer },
     }),
 }));

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -38,7 +39,10 @@ export function ConfirmDialog({
 
   if (!open) return null;
 
-  return (
+  // Portalled straight to <body> so `position: fixed` centers on the actual
+  // viewport, not on whatever containing block it happens to pick up from
+  // wherever this component is mounted in the tree.
+  return createPortal(
     <div
       className="confirm-overlay"
       role="presentation"
@@ -61,6 +65,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

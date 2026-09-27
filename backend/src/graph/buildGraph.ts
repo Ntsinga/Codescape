@@ -282,6 +282,13 @@ function resolveImportToFile(fromFile: string, source: string, language: Languag
     if (!source.startsWith(".")) return null; // bare package specifier, not in-repo
     const base = path.posix.normalize(path.posix.join(dir, source));
     const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`, `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`];
+    // TypeScript ESM (NodeNext) imports name the compiled output: "./queries.js" means queries.ts.
+    const compiled = base.match(/^(.*)\.(m|c)?jsx?$/);
+    if (compiled) {
+      const stem = compiled[1];
+      const ts = compiled[2] === "m" ? ".mts" : compiled[2] === "c" ? ".cts" : ".ts";
+      candidates.push(`${stem}${ts}`, `${stem}.tsx`);
+    }
     for (const c of candidates) {
       const norm = c.replace(/^\.\//, "");
       if (fileIdByPath.has(norm)) return norm;

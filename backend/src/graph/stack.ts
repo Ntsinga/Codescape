@@ -1,5 +1,6 @@
 import { getPool } from "./db.js";
 import { getFileContent } from "./queries.js";
+import { KNOWN_PACKAGES } from "./packages.js";
 
 export interface StackResult {
   languages: Array<{ name: string; files: number }>;
@@ -13,26 +14,8 @@ const LANGUAGE_LABELS: Record<string, string> = {
   csharp: "C#",
 };
 
-// Known dependency → framework/library display name, matched by substring.
-const DEP_FRAMEWORKS: Array<{ match: RegExp; name: string }> = [
-  { match: /^react-native$|^expo$/, name: "React Native" },
-  { match: /^next$/, name: "Next.js" },
-  { match: /^react$/, name: "React" },
-  { match: /^vue$/, name: "Vue" },
-  { match: /^svelte$/, name: "Svelte" },
-  { match: /^@angular\/core$/, name: "Angular" },
-  { match: /^express$/, name: "Express" },
-  { match: /^fastify$/, name: "Fastify" },
-  { match: /^@nestjs\/core$/, name: "NestJS" },
-  { match: /^koa$/, name: "Koa" },
-  { match: /^@clerk\//, name: "Clerk (auth)" },
-  { match: /^firebase(-admin)?$/, name: "Firebase" },
-  { match: /^prisma$|^@prisma\/client$/, name: "Prisma" },
-  { match: /^typeorm$/, name: "TypeORM" },
-  { match: /^mongoose$/, name: "Mongoose" },
-  { match: /^tailwindcss$/, name: "Tailwind CSS" },
-  { match: /^vite$/, name: "Vite" },
-];
+// Known dependency → framework/library display name (shared table, stack-strip entries only).
+const DEP_FRAMEWORKS = KNOWN_PACKAGES.filter((p) => p.stackChip);
 
 const PY_FRAMEWORKS: Array<{ match: RegExp; name: string }> = [
   { match: /fastapi/i, name: "FastAPI" },

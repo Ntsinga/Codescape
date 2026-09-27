@@ -15,7 +15,67 @@ import type { GraphNode, GraphEdge } from "./types.js";
  * The raw directory/file structure lives in the separate physical "Files" layer;
  * this layer is the meaning-oriented view.
  */
-export type SemanticType = "System" | "Concept" | "Group" | "Unit" | "Function";
+export type SemanticType = "System" | "Concept" | "Group" | "Unit" | "Function" | "External";
+
+/** What a node IS architecturally — drives its 3D form (see graph/architecture.ts). */
+export type Archetype =
+  | "System"
+  | "Domain"
+  | "Interface"
+  | "Gateway"
+  | "Service"
+  | "Logic"
+  | "Data"
+  | "External"
+  | "Support"
+  | "Function";
+
+export interface NodeMetrics {
+  files: number;
+  functions: number;
+  /** Lines covered by functions (a proxy for size; whole-file LOC isn't stored). */
+  loc: number;
+  /** Distinct neighbours depending on / depended on by this node, across its sibling + context links. */
+  fanIn: number;
+  fanOut: number;
+  /** 0..1, degree relative to the busiest sibling. */
+  centrality: number;
+  /** Max baseline risk score (0..100) of any source range inside. */
+  risk: number;
+  riskReasons: string[];
+  isolated: boolean;
+  /** Nothing outside this node references it, and it isn't an entry point / support file. A candidate, not a verdict. */
+  unusedCandidate: boolean;
+  entrypoints: number;
+}
+
+/** Aggregated dependency between two semantic nodes (Imports + Calls rolled up). */
+export interface SemanticLink {
+  from: string;
+  to: string;
+  weight: number;
+  imports: number;
+  calls: number;
+  /** Share (0..1) of underlying edges that are name-matched rather than statically confirmed. */
+  inferredShare: number;
+  /** sibling = both share a parent; context = one end is a top-level domain or external system. */
+  scope: "sibling" | "context";
+}
+
+export interface EntryPoint {
+  id: string;
+  label: string;
+  method: string;
+  path: string;
+  filePath: string;
+  line: number;
+  /** Line where the next route in the same file starts (bounds an inline handler). */
+  endLine: number;
+  /** Enclosing named function, if the handler isn't inline. */
+  functionNodeId: string | null;
+  fileNodeId: string;
+  semanticId: string | null;
+}
 
 export interface SemanticNode {
   id: string;
@@ -40,12 +100,25 @@ export interface SemanticNode {
   language: string | null;
   childCount: number;
   evidence: Array<{ file: string; startLine: number | null; endLine: number | null }>;
+  /** AI-chosen architectural archetype for a Concept (optional; dominant file role is the fallback). */
+  architecturalKind?: Archetype | null;
+  // Filled by graph/architecture.ts:
+  archetype?: Archetype;
+  /** Archetype that decides the vertical layer (a Domain sits at its dominant role's layer). */
+  layerArchetype?: Archetype;
+  /** Vertical architecture layer: 0 Interface … 5 External; -1 = support ring, null = centre (System). */
+  layer?: number | null;
+  metrics?: NodeMetrics;
 }
 
 export interface SemanticTree {
   nodes: SemanticNode[];
   aiEnriched: boolean;
   generatedAt: string;
+  links?: SemanticLink[];
+  entrypoints?: EntryPoint[];
+  /** Bumped when the architecture pass changes shape, so stale stored trees get recomputed. */
+  architectureVersion?: number;
 }
 
 interface UnitSeed {
@@ -244,7 +317,7 @@ function commonDirPrefixLength(paths: string[]): number {
 export function applyConceptGrouping(
   tree: SemanticTree,
   overview: string | null,
-  concepts: Array<{ name: string; kind?: string; summary?: string; capability?: string | null; confidence?: number; memberUnitIds: string[] }>
+  concepts: Array<{ name: string; kind?: string; summary?: string; capability?: string | null; confidence?: number; architecturalKind?: string | null; memberUnitIds: string[] }>
 ): SemanticTree {
   const system = tree.nodes.find((n) => n.type === "System");
   if (!system) return tree;
@@ -279,6 +352,7 @@ export function applyConceptGrouping(
       language: null,
       childCount: 0,
       evidence: [],
+      architecturalKind: parseArchitecturalKind(c.architecturalKind),
     };
     newConcepts.push(concept);
     for (const id of members) {
@@ -319,7 +393,16 @@ export function applyConceptGrouping(
   return { nodes: rebuilt, aiEnriched: true, generatedAt: new Date().toISOString() };
 }
 
-function finalizeCounts(nodes: SemanticNode[]): void {
+const AI_KINDS: Archetype[] = ["Interface", "Gateway", "Service", "Logic", "Data", "Support"];
+
+/** Accepts only the fixed archetype vocabulary the enrichment prompt offers. */
+function parseArchitecturalKind(raw: unknown): Archetype | null {
+  if (typeof raw !== "string") return null;
+  const hit = AI_KINDS.find((k) => k.toLowerCase() === raw.trim().toLowerCase());
+  return hit ?? null;
+}
+
+export function finalizeCounts(nodes: SemanticNode[]): void {
   const counts = new Map<string, number>();
   for (const n of nodes) if (n.parentId) counts.set(n.parentId, (counts.get(n.parentId) ?? 0) + 1);
   for (const n of nodes) n.childCount = counts.get(n.id) ?? 0;
@@ -344,21 +427,58 @@ export function buildFileAdjacency(nodes: GraphNode[], edges: GraphEdge[]): Map<
   return adj;
 }
 
-const DOC_EXT = /\.(md|mdx|markdown|txt|rst|adoc)$/i;
-const CONFIG_EXT = /\.(json|ya?ml|toml|xml|ini|lock|env)$/i;
-
-function immediateDir(path: string | null): string {
-  if (!path) return "Core";
-  const segs = path.split("/");
-  return segs.length > 1 ? segs[segs.length - 2] : "Core";
-}
+export const DOC_EXT = /\.(md|mdx|markdown|txt|rst|adoc)$/i;
+export const CONFIG_EXT = /\.(json|ya?ml|toml|xml|ini|lock|env)$/i;
 
 /**
  * Inserts a Group layer between Concept and Unit so large concepts aren't a flat
  * fan of files. Groups are: Tests, Documentation, Configuration (by role/ext),
- * then clusters of files that import/call each other, then a directory fallback.
+ * then one group per folder (files alone in a folder join the group they link
+ * to most; a single-folder concept is split by link communities instead).
  * Concepts with few files are left flat.
  */
+/**
+ * Deterministic label propagation over the file adjacency: each file adopts the
+ * most common label among its neighbours until stable. Returns communities
+ * named after their most-connected file.
+ */
+function linkCommunities(files: SemanticNode[], adjacency: Map<string, Set<string>>): Map<string, SemanticNode[]> {
+  const idOf = (f: SemanticNode) => f.physicalNodeId ?? f.id;
+  const ids = new Set(files.map(idOf));
+  const label = new Map(files.map((f) => [idOf(f), idOf(f)]));
+  const ordered = [...files].sort((a, b) => (a.filePath ?? "").localeCompare(b.filePath ?? ""));
+  for (let round = 0; round < 10; round++) {
+    let changed = false;
+    for (const f of ordered) {
+      const counts = new Map<string, number>();
+      for (const nb of adjacency.get(idOf(f)) ?? []) if (ids.has(nb)) counts.set(label.get(nb)!, (counts.get(label.get(nb)!) ?? 0) + 1);
+      const best = [...counts.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0];
+      if (best && best[0] !== label.get(idOf(f))) { label.set(idOf(f), best[0]); changed = true; }
+    }
+    if (!changed) break;
+  }
+  const byLabel = new Map<string, SemanticNode[]>();
+  for (const f of files) (byLabel.get(label.get(idOf(f))!) ?? byLabel.set(label.get(idOf(f))!, []).get(label.get(idOf(f))!)!).push(f);
+  const out = new Map<string, SemanticNode[]>();
+  for (const list of byLabel.values()) {
+    const hub = [...list].sort((a, b) => (adjacency.get(idOf(b))?.size ?? 0) - (adjacency.get(idOf(a))?.size ?? 0))[0];
+    let name = `${hub.rawName.replace(/\.[^.]+$/, "")} & linked`;
+    while (out.has(name)) name += "'";
+    out.set(name, list);
+  }
+  return out;
+}
+
+/** Undoes addSubgroups (files return to their concept) so a stored tree can be regrouped without losing AI concepts. */
+export function removeSubgroups(tree: SemanticTree): SemanticTree {
+  const groupParent = new Map(tree.nodes.filter((n) => n.type === "Group").map((g) => [g.id, g.parentId]));
+  const nodes = tree.nodes
+    .filter((n) => n.type !== "Group")
+    .map((n) => (n.parentId && groupParent.has(n.parentId) ? { ...n, parentId: groupParent.get(n.parentId)! } : n));
+  finalizeCounts(nodes);
+  return { ...tree, nodes };
+}
+
 export function addSubgroups(tree: SemanticTree, adjacency: Map<string, Set<string>>): SemanticTree {
   const nodes = tree.nodes;
   const concepts = nodes.filter((n) => n.type === "Concept");
@@ -402,48 +522,46 @@ export function addSubgroups(tree: SemanticTree, adjacency: Map<string, Set<stri
     attach(docs, "Documentation", "Docs");
     attach(config, "Configuration", "Config");
 
-    // Core: connected components of files that talk to each other.
-    const coreIds = new Set(core.map((f) => f.physicalNodeId ?? f.id));
-    const byPhys = new Map(core.map((f) => [f.physicalNodeId ?? f.id, f]));
-    const seen = new Set<string>();
-    const remaining: SemanticNode[] = [];
+    // Core: one group per folder — folders are how developers already split
+    // responsibilities, and unlike "files that import each other" they don't
+    // collapse into a single blob once imports resolve.
+    const byDir = new Map<string, SemanticNode[]>(); // full folder path → files
     for (const f of core) {
-      const pid = f.physicalNodeId ?? f.id;
-      if (seen.has(pid)) continue;
-      // BFS within core using adjacency
-      const comp: SemanticNode[] = [];
-      const queue = [pid];
-      seen.add(pid);
-      while (queue.length) {
-        const cur = queue.shift()!;
-        const node = byPhys.get(cur);
-        if (node) comp.push(node);
-        for (const nb of adjacency.get(cur) ?? []) {
-          if (coreIds.has(nb) && !seen.has(nb)) { seen.add(nb); queue.push(nb); }
-        }
+      const d = f.filePath && f.filePath.includes("/") ? f.filePath.slice(0, f.filePath.lastIndexOf("/")) : "";
+      (byDir.get(d) ?? byDir.set(d, []).get(d)!).push(f);
+    }
+    // Name by the folder; add the parent folder when two share a name (two "utils/").
+    const leaf = (d: string) => d.split("/").pop() || "Core";
+    const leafCount = new Map<string, number>();
+    for (const [d, list] of byDir) if (list.length >= 2) leafCount.set(leaf(d), (leafCount.get(leaf(d)) ?? 0) + 1);
+    const dirName = (d: string) => ((leafCount.get(leaf(d)) ?? 0) > 1 ? d.split("/").slice(-2).join("/") : leaf(d));
+    const groupOfFile = new Map<string, SemanticNode>(); // physical file id → its folder group
+    const loners: SemanticNode[] = [];
+    const dirGroups = [...byDir.entries()].filter(([, list]) => list.length >= 2);
+    if (dirGroups.length === 1 && dirGroups[0][1].length === core.length) {
+      // Everything shares one folder: split by link communities instead.
+      for (const [label, list] of linkCommunities(core, adjacency)) {
+        if (list.length < 2) { loners.push(...list); continue; }
+        const g = makeGroup(label, "Linked");
+        for (const f of list) { f.parentId = g.id; groupOfFile.set(f.physicalNodeId ?? f.id, g); }
       }
-      if (comp.length >= 2) {
-        // Name the cluster by a shared directory if there is one, else by its hub file.
-        const dirs = new Set(comp.map((c) => immediateDir(c.filePath)));
-        const name = dirs.size === 1 ? [...dirs][0] : (comp[0].rawName.replace(/\.[^.]+$/, "") + " & linked");
-        const g = makeGroup(name, "Linked");
-        for (const c of comp) c.parentId = g.id;
-      } else {
-        remaining.push(comp[0] ?? f);
+    } else {
+      for (const [dir, list] of byDir) {
+        if (list.length < 2) { loners.push(...list); continue; }
+        const g = makeGroup(dirName(dir), "Module");
+        for (const f of list) { f.parentId = g.id; groupOfFile.set(f.physicalNodeId ?? f.id, g); }
       }
     }
 
-    // Leftover core singletons: group by immediate directory when 2+ share one.
-    const byDir = new Map<string, SemanticNode[]>();
-    for (const f of remaining) {
-      const d = immediateDir(f.filePath);
-      (byDir.get(d) ?? byDir.set(d, []).get(d)!).push(f);
-    }
-    for (const [dir, list] of byDir) {
-      if (list.length >= 2) {
-        const g = makeGroup(dir, "Module");
-        for (const f of list) f.parentId = g.id;
+    // A file alone in its folder joins the group it talks to most (else stays under the concept).
+    for (const f of loners) {
+      const votes = new Map<SemanticNode, number>();
+      for (const nb of adjacency.get(f.physicalNodeId ?? f.id) ?? []) {
+        const g = groupOfFile.get(nb);
+        if (g) votes.set(g, (votes.get(g) ?? 0) + 1);
       }
+      const best = [...votes.entries()].sort((x, y) => y[1] - x[1] || x[0].name.localeCompare(y[0].name))[0];
+      if (best) f.parentId = best[0].id;
     }
   }
 

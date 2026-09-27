@@ -34,6 +34,14 @@ ${samplePaths.join("\n")}
 
 Propose 4-8 high-level CONCEPTS (capabilities / domains / responsibility areas) that best describe THIS codebase — you choose the vocabulary (e.g. "Authentication", "Financial Tracking", "AI Orchestration", "Data Layer", "Mobile UI"). Also write a 2-3 sentence plain-language overview of what the system does.
 
+For each concept also give "architecturalKind": the ONE architecture layer it mostly lives in, chosen from exactly these values:
+- "Interface" (user-facing UI / screens / components)
+- "Gateway" (API routes, controllers, HTTP clients — the boundary)
+- "Service" (application services orchestrating work)
+- "Logic" (domain logic, core algorithms, shared utilities)
+- "Data" (persistence, models, repositories, schemas)
+- "Support" (tests, build, config, tooling, docs)
+
 Return the overview and a list of concepts.`;
 
   const conceptItemSchema = {
@@ -43,6 +51,7 @@ Return the overview and a list of concepts.`;
       kind: { type: "STRING" },
       summary: { type: "STRING" },
       capability: { type: "STRING" },
+      architecturalKind: { type: "STRING", enum: ["Interface", "Gateway", "Service", "Logic", "Data", "Support"] },
     },
     required: ["name"],
   };
@@ -56,13 +65,13 @@ Return the overview and a list of concepts.`;
   };
 
   let overview: string | null = null;
-  let conceptDefs: Array<{ name: string; kind?: string; summary?: string; capability?: string | null }> = [];
+  let conceptDefs: Array<{ name: string; kind?: string; summary?: string; capability?: string | null; architecturalKind?: string | null }> = [];
   try {
     const { text, provider, model } = await generateWithRetry({ prompt: promptA, json: true, schema: passASchema, schemaName: "concept_proposal", maxTokens: 3000, temperature: 0.2 });
     const parsed = parseJsonLoose(text) as any;
     overview = typeof parsed?.overview === "string" ? parsed.overview : null;
     conceptDefs = Array.isArray(parsed?.concepts)
-      ? parsed.concepts.filter((c: any) => c && typeof c.name === "string").map((c: any) => ({ name: c.name, kind: c.kind, summary: c.summary, capability: c.capability ?? null }))
+      ? parsed.concepts.filter((c: any) => c && typeof c.name === "string").map((c: any) => ({ name: c.name, kind: c.kind, summary: c.summary, capability: c.capability ?? null, architecturalKind: c.architecturalKind ?? null }))
       : [];
     console.log(`[enrich:A] ${provider}/${model}: ${conceptDefs.length} concepts proposed`);
     if (conceptDefs.length === 0) console.error(`[enrich:A] raw output head:`, (text || "").slice(0, 300));
@@ -77,7 +86,7 @@ Return the overview and a list of concepts.`;
 
   // Concept set that GROWS across rounds — later batches can reuse or extend it.
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const conceptByNorm = new Map<string, { name: string; kind?: string; summary?: string; capability?: string | null }>();
+  const conceptByNorm = new Map<string, { name: string; kind?: string; summary?: string; capability?: string | null; architecturalKind?: string | null }>();
   for (const c of conceptDefs) conceptByNorm.set(norm(c.name), c);
   function resolveOrAdd(name: unknown, meta?: { kind?: string; summary?: string; capability?: string | null }): string | null {
     if (typeof name !== "string" || !name.trim()) return null;
@@ -157,6 +166,7 @@ Return an "assignments" array with one entry {id, concept} for EVERY file id abo
       kind: def.kind,
       summary: def.summary,
       capability: def.capability ?? null,
+      architecturalKind: def.architecturalKind ?? null,
       confidence: 0.75,
       memberUnitIds: units.filter((u) => assignments.get(u.id) === def.name).map((u) => u.id),
     }))

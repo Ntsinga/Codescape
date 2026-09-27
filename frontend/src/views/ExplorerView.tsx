@@ -37,7 +37,7 @@ export function ExplorerView() {
     setEnrichNote(null);
     try {
       const tree = await decomposeRepository(repoId, true);
-      setSemantic({ nodes: tree.nodes, aiEnriched: tree.aiEnriched });
+      setSemantic(tree);
       if (!tree.aiEnriched) setEnrichNote(tree.enrichmentError ?? "AI naming unavailable — showing structural names.");
     } catch (err) {
       setEnrichNote(err instanceof Error ? err.message : "Rebuild failed");
@@ -62,7 +62,7 @@ export function ExplorerView() {
     setEnrichNote(null);
     decomposeRepository(repoId, true)
       .then((tree) => {
-        setSemantic({ nodes: tree.nodes, aiEnriched: tree.aiEnriched });
+        setSemantic(tree);
         if (!tree.aiEnriched) setEnrichNote(tree.enrichmentError ?? "AI naming unavailable — showing structural names.");
       })
       .catch((err) => setEnrichNote(err instanceof Error ? err.message : "AI naming failed"))

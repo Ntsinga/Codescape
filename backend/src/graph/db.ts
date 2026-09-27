@@ -40,8 +40,10 @@ async function migrate(): Promise<void> {
       origin_kind TEXT,
       origin_owner TEXT,
       origin_repo TEXT,
-      origin_branch TEXT
+      origin_branch TEXT,
+      user_id TEXT
     );
+    CREATE INDEX IF NOT EXISTS idx_repos_user ON repos(user_id);
 
     CREATE TABLE IF NOT EXISTS files (
       id TEXT PRIMARY KEY,
@@ -88,6 +90,14 @@ async function migrate(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_node_id);
     CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_node_id);
 
+    -- Git history for the 3D timeline (GitHub imports only; zip uploads have none).
+    CREATE TABLE IF NOT EXISTS repo_history (
+      repo_id TEXT PRIMARY KEY,
+      collected_at TEXT NOT NULL,
+      files_json TEXT,
+      error TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT
@@ -95,8 +105,10 @@ async function migrate(): Promise<void> {
 
     -- GitHub OAuth: persisted so connections survive backend restarts/cold starts
     -- (the free tier recycles memory frequently, which would otherwise drop sessions).
+    -- One token per Clerk user (not a bearer "connection" id) so a token can only
+    -- ever be looked up under its owner's authenticated session.
     CREATE TABLE IF NOT EXISTS github_sessions (
-      connection TEXT PRIMARY KEY,
+      user_id TEXT PRIMARY KEY,
       token TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
@@ -104,5 +116,26 @@ async function migrate(): Promise<void> {
       state TEXT PRIMARY KEY,
       created_at TEXT NOT NULL
     );
+    ALTER TABLE github_oauth_state ADD COLUMN IF NOT EXISTS user_id TEXT;
   `);
+
+  // One-time rekey: the old github_sessions schema stored tokens under a random,
+  // unauthenticated "connection" id that anyone holding it could use. Those rows
+  // predate any user identity, so there's no owner to migrate them to. Rather than
+  // delete them, rename the old table out of the way (nothing is destroyed; you can
+  // inspect or drop it yourself later) and start a fresh, user_id-keyed table.
+  // Guarded so later restarts (already migrated) are a no-op.
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'github_sessions' AND column_name = 'connection'`
+  );
+  if (rows.length > 0) {
+    await db.query(`ALTER TABLE github_sessions RENAME TO github_sessions_legacy_connection_id`);
+    await db.query(`
+      CREATE TABLE github_sessions (
+        user_id TEXT PRIMARY KEY,
+        token TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  }
 }

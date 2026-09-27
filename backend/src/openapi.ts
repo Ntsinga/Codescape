@@ -12,6 +12,9 @@ export const openApiSpec = {
       "then explore its graph, conceptual map, and source. All durable state lives in Postgres.",
   },
   servers: [{ url: "/", description: "This server" }],
+  // Every route requires a signed-in Clerk user except the ones that opt out
+  // below (health check, and GitHub's own OAuth redirects).
+  security: [{ bearerAuth: [] }],
   tags: [
     { name: "Repositories", description: "Upload, list, and inspect repositories" },
     { name: "Graph", description: "The parsed node/edge graph" },
@@ -22,7 +25,7 @@ export const openApiSpec = {
   ],
   paths: {
     "/api/health": {
-      get: { tags: ["System"], summary: "Health check", responses: { "200": { description: "Service is up", content: jsonExample({ ok: true }) } } },
+      get: { tags: ["System"], summary: "Health check", security: [], responses: { "200": { description: "Service is up", content: jsonExample({ ok: true }) } } },
     },
     "/api/repos": {
       get: {
@@ -136,21 +139,27 @@ export const openApiSpec = {
       },
     },
     "/api/github/connect": {
-      get: { tags: ["GitHub"], summary: "Begin GitHub OAuth (redirects to GitHub)", responses: { "302": { description: "Redirect to GitHub authorize" } } },
+      get: {
+        tags: ["GitHub"],
+        summary: "Begin GitHub OAuth for the signed-in user (redirects to GitHub)",
+        security: [],
+        parameters: [{ name: "token", in: "query", required: true, description: "Clerk session token (this route is a browser navigation, not a fetch, so it can't carry an Authorization header)", schema: { type: "string" } }],
+        responses: { "302": { description: "Redirect to GitHub authorize" } },
+      },
     },
     "/api/github/repos": {
       get: {
         tags: ["GitHub"],
-        summary: "List the connected account's repositories",
-        parameters: [{ name: "connection", in: "query", required: true, schema: { type: "string" } }],
+        summary: "List the signed-in user's connected GitHub repositories",
+        security: [{ bearerAuth: [] }],
         responses: { "200": { description: "Repositories", content: refArray("GitHubRepo") }, "401": errRef() },
       },
     },
     "/api/github/import": {
       post: {
         tags: ["GitHub"],
-        summary: "Import a repository from the connected account",
-        parameters: [{ name: "connection", in: "query", required: true, schema: { type: "string" } }],
+        summary: "Import a repository from the signed-in user's connected account",
+        security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: jsonExample({ owner: "Ntsinga", repo: "Codescape", branch: "main" }) },
         responses: { "201": { description: "Imported", content: jsonExample({ repoId: "abc123", fileCount: 42, symbolCount: 310 }) } },
       },
@@ -185,6 +194,9 @@ export const openApiSpec = {
         type: "object",
         properties: { id: { type: "integer" }, name: { type: "string" }, fullName: { type: "string" }, private: { type: "boolean" }, defaultBranch: { type: "string" } },
       },
+    },
+    securitySchemes: {
+      bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "Clerk session token", description: "Obtained client-side via Clerk's getToken(); sent as `Authorization: Bearer <token>`." },
     },
   },
 } as const;

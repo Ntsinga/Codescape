@@ -5,9 +5,12 @@ import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
+import { verifyToken } from "@clerk/backend";
 import { processRepoZip } from "../ingestion/processRepo.js";
 import { uploadsTmpDir } from "../storage/paths.js";
-import { getRepo, savePendingOAuthState, consumePendingOAuthState, saveGithubSession, getGithubSessionToken } from "../graph/queries.js";
+import { getRepoForUser, savePendingOAuthState, consumePendingOAuthState, saveGithubSession, getGithubSessionToken } from "../graph/queries.js";
+import { requireUser, getAuth } from "../auth.js";
+import { collectHistoryInBackground } from "../graph/history.js";
 
 const githubRouter = Router();
 const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
@@ -19,11 +22,31 @@ function config() {
   return { clientId, clientSecret };
 }
 
+/**
+ * Hit via a plain <a href> navigation (see frontend UploadView), not a fetch call,
+ * so there's no Authorization header to read here — instead the frontend appends
+ * the Clerk session token as ?token=, which we verify once up front. From here on,
+ * the CSRF `state` we already generate carries the resulting userId through to
+ * /github/callback (which GitHub redirects to with no auth of its own attached).
+ */
 githubRouter.get("/github/connect", async (req, res) => {
   try {
+    const rawToken = String(req.query.token ?? "");
+    if (!rawToken) { failToApp(res, "Sign in first, then click Connect GitHub again."); return; }
+    const secretKey = process.env.CLERK_SECRET_KEY;
+    if (!secretKey) { res.status(500).json({ error: "CLERK_SECRET_KEY is not configured" }); return; }
+    let userId: string;
+    try {
+      const claims = await verifyToken(rawToken, { secretKey });
+      userId = claims.sub;
+    } catch {
+      failToApp(res, "Your session expired. Please sign in again and retry.");
+      return;
+    }
+
     const { clientId } = config();
     const state = crypto.randomBytes(24).toString("hex");
-    await savePendingOAuthState(state);
+    await savePendingOAuthState(state, userId);
     const callback = process.env.GITHUB_CALLBACK_URL ?? "http://localhost:4000/api/github/callback";
     const url = new URL("https://github.com/login/oauth/authorize");
     url.searchParams.set("client_id", clientId);
@@ -42,8 +65,8 @@ function failToApp(res: import("express").Response, message: string): void {
 
 githubRouter.get("/github/callback", async (req, res) => {
   const state = String(req.query.state ?? "");
-  const createdAt = await consumePendingOAuthState(state);
-  if (!createdAt || Date.now() - createdAt.getTime() > 10 * 60_000) {
+  const pending = await consumePendingOAuthState(state);
+  if (!pending || Date.now() - pending.createdAt.getTime() > 10 * 60_000) {
     failToApp(res, "GitHub sign-in expired or was already used. Please click Connect GitHub again.");
     return;
   }
@@ -77,24 +100,17 @@ githubRouter.get("/github/callback", async (req, res) => {
       return;
     }
 
-    const connection = crypto.randomBytes(18).toString("hex");
-    await saveGithubSession(connection, token.access_token);
-    res.redirect(`${frontendUrl}/?github=connected&connection=${connection}`);
+    await saveGithubSession(pending.userId, token.access_token);
+    res.redirect(`${frontendUrl}/?github=connected`);
   } catch (err) {
     console.error("[github] callback error:", err);
     failToApp(res, err instanceof Error ? err.message : "GitHub authentication failed");
   }
 });
 
-function connectionId(req: import("express").Request): string {
-  return String(req.query.connection ?? req.headers["x-github-connection"] ?? "");
-}
-function sessionToken(req: import("express").Request): Promise<string | null> {
-  return getGithubSessionToken(connectionId(req));
-}
-
-githubRouter.get("/github/repos", async (req, res) => {
-  const token = await sessionToken(req);
+githubRouter.get("/github/repos", requireUser, async (req, res) => {
+  const { userId } = getAuth(req);
+  const token = await getGithubSessionToken(userId!);
   if (!token) { res.status(401).json({ error: "Connect GitHub first" }); return; }
   const response = await fetch("https://api.github.com/user/repos?sort=updated&per_page=100", { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
   if (!response.ok) { res.status(response.status).json({ error: "Unable to list GitHub repositories" }); return; }
@@ -115,8 +131,9 @@ async function downloadZipball(token: string, owner: string, repo: string, branc
   return zipPath;
 }
 
-githubRouter.post("/github/import", async (req, res) => {
-  const token = await sessionToken(req);
+githubRouter.post("/github/import", requireUser, async (req, res) => {
+  const { userId } = getAuth(req);
+  const token = await getGithubSessionToken(userId!);
   if (!token) { res.status(401).json({ error: "Connect GitHub first" }); return; }
   const { owner, repo, branch } = req.body ?? {};
   if (!owner || !repo) { res.status(400).json({ error: "owner and repo are required" }); return; }
@@ -124,7 +141,9 @@ githubRouter.post("/github/import", async (req, res) => {
     const zipPath = await downloadZipball(token, owner, repo, branch);
     const result = await processRepoZip(zipPath, `${owner}/${repo}`, {
       origin: { kind: "github", owner, repo, branch: branch ?? "HEAD" },
+      userId: userId!,
     });
+    collectHistoryInBackground(result.repoId, owner, repo, branch ?? null, token);
     res.status(201).json(result);
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "GitHub repository processing failed" });
@@ -132,11 +151,12 @@ githubRouter.post("/github/import", async (req, res) => {
 });
 
 /** Re-fetch a previously imported GitHub repo into the SAME repo id (no duplicate). */
-githubRouter.post("/github/reimport", async (req, res) => {
-  const token = await sessionToken(req);
+githubRouter.post("/github/reimport", requireUser, async (req, res) => {
+  const { userId } = getAuth(req);
+  const token = await getGithubSessionToken(userId!);
   if (!token) { res.status(401).json({ error: "Connect GitHub first" }); return; }
   const repoId = String(req.body?.repoId ?? "");
-  const record = await getRepo(repoId);
+  const record = await getRepoForUser(repoId, userId!);
   if (!record) { res.status(404).json({ error: "Repository not found" }); return; }
   if (record.origin.kind !== "github" || !record.origin.owner || !record.origin.repo) {
     res.status(400).json({ error: "This repository was not imported from GitHub" });
@@ -149,10 +169,26 @@ githubRouter.post("/github/reimport", async (req, res) => {
       repoId,
       origin: { kind: "github", owner, repo, branch: branch ?? "HEAD" },
     });
+    collectHistoryInBackground(repoId, owner, repo, branch ?? null, token);
     res.status(200).json(result);
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "GitHub re-import failed" });
   }
+});
+
+/** (Re)collect git history for the 3D timeline without re-importing the code. */
+githubRouter.post("/github/history", requireUser, async (req, res) => {
+  const { userId } = getAuth(req);
+  const token = await getGithubSessionToken(userId!);
+  if (!token) { res.status(401).json({ error: "Connect GitHub first" }); return; }
+  const record = await getRepoForUser(String(req.body?.repoId ?? ""), userId!);
+  if (!record) { res.status(404).json({ error: "Repository not found" }); return; }
+  if (record.origin.kind !== "github" || !record.origin.owner || !record.origin.repo) {
+    res.status(400).json({ error: "Only GitHub imports have history — a zip upload is a single snapshot." });
+    return;
+  }
+  collectHistoryInBackground(record.id, record.origin.owner, record.origin.repo, record.origin.branch, token);
+  res.status(202).json({ ok: true });
 });
 
 export { githubRouter };
