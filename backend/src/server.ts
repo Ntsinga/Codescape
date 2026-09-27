@@ -66,6 +66,10 @@ async function main() {
   const port = Number(process.env.PORT) || 4000;
   app.listen(port, () => {
     console.log(`codescape-backend listening on http://localhost:${port}`);
+    // TEMPORARY: baseline memory right after boot, to compare against the
+    // per-stage [mem] logs an import prints (see ingestion/processRepo.ts).
+    const m = process.memoryUsage();
+    console.log(`[mem] server ready: rss=${(m.rss / 1024 / 1024).toFixed(1)}MB heapUsed=${(m.heapUsed / 1024 / 1024).toFixed(1)}MB`);
   });
 }
 
