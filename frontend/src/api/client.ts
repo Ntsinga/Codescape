@@ -12,10 +12,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * TypeError, surfaced in the browser as a CORS error because the 502 wake-up page
  * carries no CORS headers). We retry those transient network failures a few times
  * so a cold start is a short wait, not an error.
+ *
+ * This retry is only safe for idempotent requests (reads, or writes the server
+ * already de-dupes). For a request that kicks off real, expensive server-side work
+ * with no de-dup (e.g. a GitHub import), retrying a "failed" request that actually
+ * just landed on a struggling server means firing that same expensive job again —
+ * concurrently with the first one, in the same process. Pass `retryable: false`
+ * for those so a slow/erroring attempt fails fast instead of piling up duplicates.
  */
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, opts: { retryable?: boolean } = {}): Promise<T> {
   const url = `${BASE}${path}`;
-  const maxNetworkRetries = 4;
+  const maxNetworkRetries = opts.retryable === false ? 0 : 4;
   for (let attempt = 0; ; attempt++) {
     let res: Response;
     try {
@@ -50,7 +57,9 @@ export async function uploadRepo(file: File, name: string): Promise<{ repoId: st
   const form = new FormData();
   form.append("archive", file);
   form.append("name", name);
-  return request("/repos", { method: "POST", body: form });
+  // Not retryable: a "failed" upload may have already started the (expensive, non-idempotent)
+  // import pipeline server-side. Retrying would race a duplicate run against it.
+  return request("/repos", { method: "POST", body: form }, { retryable: false });
 }
 
 export function listRepos(): Promise<RepoSummary[]> {
@@ -117,8 +126,18 @@ export function getRisks(repoId: string): Promise<RiskResult> { return request(`
 export function listGitHubRepos(connection: string): Promise<GitHubRepo[]> { return request(`/github/repos?connection=${encodeURIComponent(connection)}`); }
 export function importGitHubRepo(connection: string, fullName: string, branch: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
   const [owner, repo] = fullName.split("/");
-  return request(`/github/import?connection=${encodeURIComponent(connection)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, repo, branch }) });
+  // Not retryable: see uploadRepo above — a duplicate retry means a second full
+  // import pipeline running concurrently with the first in the same 512MB process.
+  return request(
+    `/github/import?connection=${encodeURIComponent(connection)}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, repo, branch }) },
+    { retryable: false }
+  );
 }
 export function reimportGitHubRepo(connection: string, repoId: string): Promise<{ repoId: string; fileCount: number; symbolCount: number }> {
-  return request(`/github/reimport?connection=${encodeURIComponent(connection)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repoId }) });
+  return request(
+    `/github/reimport?connection=${encodeURIComponent(connection)}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repoId }) },
+    { retryable: false }
+  );
 }
