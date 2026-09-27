@@ -12,7 +12,12 @@ export interface ExplainRequest {
 }
 
 export interface ExplainResult {
-  explanation: string;
+  /** One sentence on why this exists / its role in the system, not just a rephrasing of its name. */
+  purpose: string;
+  /** What it actually does and how, in plain language. */
+  behavior: string;
+  /** Non-obvious choices, risks, or edge cases worth flagging at a glance. Empty if nothing stands out. */
+  notes: string[];
   evidence: EvidenceRef[];
 }
 
@@ -36,7 +41,9 @@ export async function explainNode(req: ExplainRequest): Promise<ExplainResult> {
     .join("\n\n");
 
   const prompt = `You are explaining a piece of source code to a developer who is unfamiliar with this codebase.
-Only describe what is actually shown below. Do not invent behavior, callers, or side effects that are not visible in the code.
+Ground everything in the code shown below. You may reasonably infer intent from naming, comments, and
+structure, but say so as inference — never invent behavior, callers, or side effects that aren't visible
+in the code or the related imports given.
 
 ${req.nodeType} "${req.nodeName}" in ${req.filePath} (lines ${req.startLine}-${req.endLine}):
 \`\`\`
@@ -44,11 +51,28 @@ ${req.code}
 \`\`\`
 ${contextBlocks ? `\nRelated imported code for context:\n${contextBlocks}` : ""}
 
-Write a concise 2-4 sentence explanation of what this ${req.nodeType.toLowerCase()} does, in plain language.`;
+Return JSON only in this shape: {"purpose":"...","behavior":"...","notes":["...","..."]}
+- purpose: one sentence on WHY this ${req.nodeType.toLowerCase()} exists and what role it plays in the
+  system — not a rephrasing of its name or a restatement of "behavior".
+- behavior: 2-4 sentences on WHAT it actually does and how, in plain language.
+- notes: 0-3 short, specific points a developer would want to know at a glance — a non-obvious design
+  choice, a risk, an edge case, something fragile or worth double-checking. Omit entirely (empty array)
+  if nothing stands out; never pad this with generic filler.`;
 
-  const { text } = await generate({ prompt, maxTokens: 300, temperature: 0.2 });
-  const explanation = text.trim() || "No explanation returned.";
-  return { explanation, evidence };
+  const { text } = await generate({ prompt, json: true, maxTokens: 500, temperature: 0.2 });
+  let parsed: Partial<{ purpose: string; behavior: string; notes: string[] }> = {};
+  try {
+    parsed = JSON.parse(text || "{}");
+  } catch {
+    // Model didn't return valid JSON (rare, but shouldn't break the UI) — surface the raw
+    // text as the behavior field rather than losing it.
+  }
+  return {
+    purpose: parsed.purpose?.trim() ?? "",
+    behavior: parsed.behavior?.trim() || text.trim() || "No explanation returned.",
+    notes: Array.isArray(parsed.notes) ? parsed.notes.filter((n): n is string => typeof n === "string" && n.trim().length > 0) : [],
+    evidence,
+  };
 }
 
 export async function analyzeArchitecture(input: { repoName: string; nodes: unknown[]; edges: unknown[] }): Promise<ArchitectureResult> {
