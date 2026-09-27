@@ -81,8 +81,16 @@ let queueTail: Promise<void> = Promise.resolve();
 
 /** Bail out of an in-flight import before it drags the whole process past the container's
  * memory limit — a graceful "failed" status for this one repo beats an OOM kill that takes
- * down every other request the process is currently serving. */
-const MAX_INGEST_RSS_BYTES = Number(process.env.INGEST_MAX_RSS_BYTES) || 420 * 1024 * 1024; // headroom under the 512MB instance
+ * down every other request the process is currently serving.
+ *
+ * The budget leaves a LARGE margin (not just a little headroom) below the real 512MB limit:
+ * `rss` is a process-wide OS metric (worker threads share the container's cgroup, so isolating
+ * parsing into a worker doesn't change this), and a single file's tree-sitter parse has been
+ * observed to jump it by 100-140MB+ in one step, unrelated to that file's own size — this is
+ * WASM arena growth, checked only after the call returns. A check that runs after every file
+ * still can't catch a jump that alone exceeds the remaining headroom before the kernel does.
+ */
+const MAX_INGEST_RSS_BYTES = Number(process.env.INGEST_MAX_RSS_BYTES) || 300 * 1024 * 1024;
 
 export function processRepoZip(zipPath: string, displayName: string, options: ProcessOptions = {}): Promise<ProcessResult> {
   // Serialize all imports/uploads: this runs as a single Node process (WEB_CONCURRENCY=1)
