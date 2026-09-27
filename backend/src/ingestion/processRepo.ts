@@ -32,6 +32,8 @@ export interface ProcessOptions {
   /** When set, re-process into this existing repo id (clears its prior data) instead of creating a new one. */
   repoId?: string;
   origin?: RepoOrigin;
+  /** Owner of a newly-created repo. Required unless repoId is set (re-import keeps the existing owner). */
+  userId?: string;
 }
 
 /**
@@ -138,6 +140,7 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
       status: "processing",
       error: null,
       origin: { kind: null, owner: null, repo: null, branch: null },
+      userId: options.userId ?? null,
     });
   }
   if (options.origin) await setRepoOrigin(repoId, options.origin);

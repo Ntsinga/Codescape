@@ -1,7 +1,9 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import { clerkMiddleware } from "@clerk/express";
 import swaggerUi from "swagger-ui-express";
+import { requireUser } from "./auth.js";
 import { openApiSpec } from "./openapi.js";
 import { ensureDataDirs } from "./storage/paths.js";
 import { ensureMigrated } from "./graph/db.js";
@@ -23,6 +25,10 @@ async function main() {
   const app = express();
   app.use(cors());
   app.use(express.json());
+  // Populates req.auth from either a session cookie or an Authorization: Bearer
+  // <token> header. Does NOT block unauthenticated requests by itself — routes
+  // that need a signed-in user are individually gated with requireUser below.
+  app.use(clerkMiddleware());
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -55,13 +61,18 @@ async function main() {
   app.get("/", (_req, res) => res.json(apiIndex));
   app.get("/api", (_req, res) => res.json(apiIndex));
 
-  app.use("/api", uploadRouter);
-  app.use("/api", reposRouter);
-  app.use("/api", graphRouter);
-  app.use("/api", sourceRouter);
-  app.use("/api", aiRouter);
+  // Each router below serves per-user data (repos, graph, source, AI actions), so
+  // every route in them requires a signed-in Clerk user. githubRouter is the one
+  // exception: it gates each of its routes individually, because /github/connect
+  // and /github/callback are plain browser navigations (no Authorization header
+  // to check) rather than the frontend's authenticated fetch calls.
+  app.use("/api", requireUser, uploadRouter);
+  app.use("/api", requireUser, reposRouter);
+  app.use("/api", requireUser, graphRouter);
+  app.use("/api", requireUser, sourceRouter);
+  app.use("/api", requireUser, aiRouter);
   app.use("/api", githubRouter);
-  app.use("/api", semanticRouter);
+  app.use("/api", requireUser, semanticRouter);
 
   const port = Number(process.env.PORT) || 4000;
   app.listen(port, () => {

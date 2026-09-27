@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { getRepo, getAllNodes, getAllEdges, getNode, getChildren, getEdgesForNode, searchNodes, getImpact } from "../graph/queries.js";
+import { getRepoForUser, getAllNodes, getAllEdges, getNode, getChildren, getEdgesForNode, searchNodes, getImpact } from "../graph/queries.js";
 import type { EdgeType } from "../graph/types.js";
+import { getAuth } from "../auth.js";
 
 export const graphRouter = Router();
 
-async function requireReadyRepo(repoId: string, res: import("express").Response): Promise<boolean> {
-  const repo = await getRepo(repoId);
+async function requireReadyRepo(repoId: string, userId: string, res: import("express").Response): Promise<boolean> {
+  const repo = await getRepoForUser(repoId, userId);
   if (!repo) {
     res.status(404).json({ error: "Repository not found" });
     return false;
@@ -19,7 +20,7 @@ async function requireReadyRepo(repoId: string, res: import("express").Response)
 
 graphRouter.get("/repos/:id/graph", async (req, res) => {
   try {
-    if (!(await requireReadyRepo(req.params.id, res))) return;
+    if (!(await requireReadyRepo(req.params.id, getAuth(req).userId!, res))) return;
     res.json({ nodes: await getAllNodes(req.params.id), edges: await getAllEdges(req.params.id) });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load graph" });
@@ -28,7 +29,7 @@ graphRouter.get("/repos/:id/graph", async (req, res) => {
 
 graphRouter.get("/repos/:id/nodes/:nodeId", async (req, res) => {
   try {
-    if (!(await requireReadyRepo(req.params.id, res))) return;
+    if (!(await requireReadyRepo(req.params.id, getAuth(req).userId!, res))) return;
     const node = await getNode(req.params.nodeId);
     if (!node || node.repoId !== req.params.id) {
       res.status(404).json({ error: "Node not found" });
@@ -45,7 +46,7 @@ graphRouter.get("/repos/:id/nodes/:nodeId", async (req, res) => {
 
 graphRouter.get("/repos/:id/nodes/:nodeId/children", async (req, res) => {
   try {
-    if (!(await requireReadyRepo(req.params.id, res))) return;
+    if (!(await requireReadyRepo(req.params.id, getAuth(req).userId!, res))) return;
     res.json(await getChildren(req.params.nodeId, req.params.id));
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to load children" });
@@ -54,7 +55,7 @@ graphRouter.get("/repos/:id/nodes/:nodeId/children", async (req, res) => {
 
 graphRouter.get("/repos/:id/search", async (req, res) => {
   try {
-    if (!(await requireReadyRepo(req.params.id, res))) return;
+    if (!(await requireReadyRepo(req.params.id, getAuth(req).userId!, res))) return;
     const q = (req.query.q as string | undefined)?.trim();
     if (!q) {
       res.json([]);
@@ -68,7 +69,7 @@ graphRouter.get("/repos/:id/search", async (req, res) => {
 
 graphRouter.get("/repos/:id/nodes/:nodeId/impact", async (req, res) => {
   try {
-    if (!(await requireReadyRepo(req.params.id, res))) return;
+    if (!(await requireReadyRepo(req.params.id, getAuth(req).userId!, res))) return;
     const node = await getNode(req.params.nodeId);
     if (!node || node.repoId !== req.params.id) {
       res.status(404).json({ error: "Node not found" });

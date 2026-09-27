@@ -1,11 +1,13 @@
 import { Router } from "express";
-import { getRepo, listRepos, deleteRepo } from "../graph/queries.js";
+import { getRepoForUser, listReposForUser, deleteRepo } from "../graph/queries.js";
+import { getAuth } from "../auth.js";
 
 export const reposRouter = Router();
 
 reposRouter.delete("/repos/:id", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const { userId } = getAuth(req);
+    const repo = await getRepoForUser(req.params.id, userId!);
     if (!repo) {
       res.status(404).json({ error: "Repository not found" });
       return;
@@ -17,9 +19,10 @@ reposRouter.delete("/repos/:id", async (req, res) => {
   }
 });
 
-reposRouter.get("/repos", async (_req, res) => {
+reposRouter.get("/repos", async (req, res) => {
   try {
-    res.json(await listRepos());
+    const { userId } = getAuth(req);
+    res.json(await listReposForUser(userId!));
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to list repositories" });
   }
@@ -27,7 +30,8 @@ reposRouter.get("/repos", async (_req, res) => {
 
 reposRouter.get("/repos/:id", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const { userId } = getAuth(req);
+    const repo = await getRepoForUser(req.params.id, userId!);
     if (!repo) {
       res.status(404).json({ error: "Repository not found" });
       return;

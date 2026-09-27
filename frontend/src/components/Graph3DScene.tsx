@@ -1,607 +1,465 @@
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Grid, Html, Line, OrbitControls, RoundedBox } from "@react-three/drei";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Edges, Grid, Html, OrbitControls } from "@react-three/drei";
+import { Bloom, EffectComposer } from "@react-three/postprocessing";
+import { useCallback, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { ExplorerNode } from "../state/store";
 import { useExplorerStore } from "../state/store";
-
-// ---- Type presentation ---------------------------------------------------
-
-/** Base tint per node type (used for shapes + labels). */
-const TYPE_TINT: Record<string, string> = {
-  // Conceptual (Map) layer
-  System: "#f0b429",
-  Concept: "#58a6ff",
-  Group: "#2dd4bf",
-  Unit: "#3fb950",
-  // Physical (Files) layer
-  Repository: "#f0b429",
-  Folder: "#5c93ff",
-  File: "#3fb950",
-  Class: "#d29922",
-  Interface: "#bc8cff",
-  Function: "#f0883e",
-  ImportedModule: "#6e7681",
-};
-
-/** Distinct emblem drawn on the badge above each node (Concept/Group show their AI kind separately). */
-const TYPE_EMBLEM: Record<string, string> = {
-  System: "📦",
-  Concept: "🧩",
-  Group: "▦",
-  Repository: "📦",
-  Folder: "📁",
-  Class: "{ }",
-  Interface: "<>",
-  Function: "ƒ",
-  ImportedModule: "⇢",
-};
-
-/** For File nodes, use the source language rather than a generic emblem. */
-const LANGUAGE_BADGE: Record<string, { label: string; color: string }> = {
-  typescript: { label: "TS", color: "#3178c6" },
-  javascript: { label: "JS", color: "#f7df1e" },
-  python: { label: "PY", color: "#3572A5" },
-  csharp: { label: "C#", color: "#68217a" },
-};
-
-function fileBadge(node: ExplorerNode): { label: string; color: string } {
-  if (node.language && LANGUAGE_BADGE[node.language]) return LANGUAGE_BADGE[node.language];
-  const ext = node.filePath?.split(".").pop()?.toUpperCase() ?? "•";
-  return { label: ext.length <= 4 ? ext : "•", color: "#4a5262" };
-}
-
-// ---- Layout --------------------------------------------------------------
-
-interface LayoutNode {
-  node: ExplorerNode;
-  position: [number, number, number];
-}
+import { ARCHETYPE_GLYPH, CORE_Y, PALETTE, archetypeOf, buildAccentMap, levelOf, sizeOf } from "../scene/grammar";
+import { layeredLayout, radialLayout, type Placed, type SceneLayout, type Vec3 } from "../scene/layout";
+import { SemanticEntity, type VisualState } from "../scene/forms/SemanticEntity";
+import { PHYSICAL_EMBLEM, PhysicalArtifact } from "../scene/forms/PhysicalArtifacts";
+import { Links } from "../scene/Links";
+import { LayerPlanes } from "../scene/LayerPlanes";
+import { SystemCard } from "../scene/hud/SystemCard";
+import { FlowPanel, HudToolbar, Legend, LevelIndicator, Minimap, Timeline } from "../scene/hud/Hud";
+import { commitsNear, semanticHistory, visibleFlow, type NodeHistory } from "../scene/derive";
+import "../scene/scene.css";
 
 /**
- * Spreads children evenly around the parent using a Fibonacci-sphere distribution,
- * with the radius scaled to the child count so neighbours keep a roughly constant
- * gap (no overlap, no squeezing). Links radiate from the centre, reading as a
- * proper radial tree you orbit around. The sphere is flattened vertically so it
- * feels like a canopy rather than a ball.
+ * The 3D map. Not a graph of files but the software system the code creates:
+ * entities shaped by what they are, stacked by architecture layer, joined by
+ * weighted directional dependencies, with flows, health and time layered on
+ * top. 3D carries the spatial relationships; the flat HUD carries meaning.
  */
-function layoutChildren(children: ExplorerNode[]): LayoutNode[] {
-  const n = children.length;
-  if (n === 0) return [];
-  if (n === 1) return [{ node: children[0], position: [0, 0, 6] }];
 
-  const spacing = 4.2; // desired gap between neighbouring nodes (fits labels)
-  const radius = Math.max(6, (spacing * Math.sqrt(n)) / 2.4);
-  const golden = Math.PI * (3 - Math.sqrt(5)); // ~2.399963 rad
+const EXPLODE_MS = 650;
+const DENSE = 40;
 
-  return children.map((node, i) => {
-    const y = 1 - (i / (n - 1)) * 2; // 1 → -1
-    const rAtY = Math.sqrt(Math.max(0, 1 - y * y));
-    const theta = golden * i;
-    const x = Math.cos(theta) * rAtY * radius;
-    const z = Math.sin(theta) * rAtY * radius;
-    return { node, position: [x, y * radius * 0.55, z] }; // flatten Y into a canopy
-  });
+const ease = (t: number) => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+
+interface SceneModel {
+  semantic: boolean;
+  focus: ExplorerNode | null;
+  layout: SceneLayout;
+  positions: Map<string, Vec3>;
+  accents: Map<string, string>;
+  /** Ids to keep bright when a flow / highlight is active (null = everything). */
+  litIds: Set<string> | null;
+  flowOrder: string[];
+  flowKeys: Set<string>;
+  history: Map<string, NodeHistory>;
+  /** Max commits-near-cursor among visible nodes (normalises the activity glow). */
+  maxActivity: number;
+  timeCursor: number | null;
+  /** Moment the activity glow is measured at: the cursor, else the latest commit. */
+  activityAt: number | null;
+  chainOf: (id: string) => string[];
 }
 
-/** Horizontal + vertical extent of a layout, for framing the camera. */
-function layoutExtent(layout: LayoutNode[]): { radius: number; height: number } {
-  if (layout.length === 0) return { radius: 4, height: 0 };
-  const radius = Math.max(...layout.map((l) => Math.hypot(l.position[0], l.position[2])));
-  const height = Math.max(...layout.map((l) => l.position[1]));
-  return { radius, height };
-}
+/** Builds everything the scene needs from the store in one memoised pass. */
+function useSceneModel(): SceneModel {
+  const layer = useExplorerStore((s) => s.layer);
+  const nodes = useExplorerStore((s) => s.nodes);
+  const nodesById = useExplorerStore((s) => s.nodesById);
+  const childrenByParent = useExplorerStore((s) => s.childrenByParent);
+  const focusNodeId = useExplorerStore((s) => s.focusNodeId);
+  const links = useExplorerStore((s) => s.links);
+  const highlight = useExplorerStore((s) => s.highlight);
+  const flow = useExplorerStore((s) => s.flow);
+  const historyResult = useExplorerStore((s) => s.history);
+  const timeCursor = useExplorerStore((s) => s.timeCursor);
 
-// ---- Per-type 3D artifacts ----------------------------------------------
+  const semantic = layer === "semantic";
+  const focus = focusNodeId ? nodesById.get(focusNodeId) ?? null : null;
+  const children = useMemo(() => (focusNodeId ? childrenByParent.get(focusNodeId) ?? [] : []), [focusNodeId, childrenByParent]);
 
-interface ArtifactProps {
-  node: ExplorerNode;
-  selected: boolean;
-  hovered: boolean;
-}
-
-function RepositoryArtifact({ selected, hovered }: ArtifactProps) {
-  const emissive = selected ? 0.9 : hovered ? 0.4 : 0.15;
-  return (
-    <group>
-      <mesh castShadow>
-        <cylinderGeometry args={[1.0, 1.1, 0.35, 24]} />
-        <meshStandardMaterial color="#3b2b0a" metalness={0.4} roughness={0.5} />
-      </mesh>
-      <mesh position={[0, 0.5, 0]} castShadow>
-        <icosahedronGeometry args={[0.75, 0]} />
-        <meshStandardMaterial color={TYPE_TINT.Repository} metalness={0.55} roughness={0.25} emissive={TYPE_TINT.Repository} emissiveIntensity={emissive} />
-      </mesh>
-    </group>
+  const chainOf = useCallback(
+    (id: string) => {
+      const out: string[] = [];
+      let cur = nodesById.get(id);
+      while (cur) {
+        out.push(cur.id);
+        cur = cur.parentId ? nodesById.get(cur.parentId) : undefined;
+      }
+      return out;
+    },
+    [nodesById]
   );
+
+  const layout = useMemo<SceneLayout>(() => {
+    if (!semantic) return radialLayout(children);
+    // Context anchors: other top-level domains / external systems the visible nodes depend on.
+    const visible = new Set(children.map((c) => c.id));
+    const focusChain = new Set(focusNodeId ? chainOf(focusNodeId) : []);
+    const anchorIds = new Set<string>();
+    if (focus && focus.type !== "System") {
+      for (const l of links) {
+        if (l.scope !== "context") continue;
+        if (visible.has(l.from) && !visible.has(l.to) && !focusChain.has(l.to)) anchorIds.add(l.to);
+        if (visible.has(l.to) && !visible.has(l.from) && !focusChain.has(l.from)) anchorIds.add(l.from);
+      }
+    }
+    const anchors = [...anchorIds].map((id) => nodesById.get(id)).filter((n): n is ExplorerNode => Boolean(n));
+    return layeredLayout(children, links, anchors);
+  }, [semantic, children, links, focus, focusNodeId, nodesById, chainOf]);
+
+  const positions = useMemo(() => {
+    const m = new Map<string, Vec3>();
+    for (const p of [...layout.placed, ...layout.anchors]) m.set(p.node.id, p.position);
+    if (focus?.type === "System") m.set(focus.id, [0, CORE_Y, 0]);
+    return m;
+  }, [layout, focus]);
+
+  const accents = useMemo(() => buildAccentMap(nodes, nodesById), [nodes, nodesById]);
+
+  const visibleSet = useMemo(() => new Set(positions.keys()), [positions]);
+  const vflow = useMemo(() => visibleFlow(flow, visibleSet, chainOf), [flow, visibleSet, chainOf]);
+
+  const history = useMemo(() => semanticHistory(nodes, historyResult), [nodes, historyResult]);
+  const activityAt = timeCursor ?? (historyResult?.range ? Date.parse(historyResult.range.end) : null);
+  const maxActivity = useMemo(() => {
+    const t = activityAt;
+    if (t === null) return 0;
+    let max = 0;
+    for (const id of visibleSet) {
+      const h = history.get(id);
+      if (h) max = Math.max(max, commitsNear(h, t));
+    }
+    return max;
+  }, [history, visibleSet, activityAt]);
+
+  const litIds = useMemo(() => {
+    if (flow) return new Set(vflow.order);
+    if (highlight) return new Set(highlight.ids);
+    return null;
+  }, [flow, vflow, highlight]);
+
+  return { semantic, focus, layout, positions, accents, litIds, flowOrder: vflow.order, flowKeys: vflow.keys, history, maxActivity, timeCursor, activityAt, chainOf };
 }
 
-function FolderArtifact({ selected, hovered }: ArtifactProps) {
-  // Open-folder silhouette: back plate (tab) + front slab.
-  const emissive = selected ? 0.6 : hovered ? 0.25 : 0;
-  return (
-    <group>
-      <RoundedBox args={[1.35, 0.9, 0.15]} radius={0.06} smoothness={4} position={[0, 0.28, -0.05]}>
-        <meshStandardMaterial color="#2b3a52" roughness={0.7} />
-      </RoundedBox>
-      <RoundedBox args={[0.7, 0.22, 0.15]} radius={0.05} smoothness={4} position={[-0.32, 0.72, -0.05]}>
-        <meshStandardMaterial color="#2b3a52" roughness={0.7} />
-      </RoundedBox>
-      <RoundedBox args={[1.4, 0.85, 0.2]} radius={0.08} smoothness={4} position={[0, 0.15, 0.05]}>
-        <meshStandardMaterial color={TYPE_TINT.Folder} roughness={0.55} metalness={0.15} emissive={TYPE_TINT.Folder} emissiveIntensity={emissive} />
-      </RoundedBox>
-    </group>
-  );
+// ---- Node ------------------------------------------------------------------------
+
+interface NodeProps {
+  placed: Placed;
+  model: SceneModel;
+  dense: boolean;
+  anchor?: boolean;
+  origin: Vec3;
+  hoveredId: string | null;
+  onHover: (id: string | null) => void;
 }
 
-function FileArtifact({ node, selected, hovered }: ArtifactProps) {
-  const badge = fileBadge(node);
-  const emissive = selected ? 0.7 : hovered ? 0.3 : 0;
-  return (
-    <group>
-      <RoundedBox args={[0.95, 1.2, 0.09]} radius={0.05} smoothness={4}>
-        <meshStandardMaterial color="#e6edf3" roughness={0.5} metalness={0.05} emissive="#58a6ff" emissiveIntensity={emissive * 0.4} />
-      </RoundedBox>
-      {/* Folded corner */}
-      <mesh position={[0.36, 0.5, 0.055]}>
-        <planeGeometry args={[0.22, 0.22]} />
-        <meshBasicMaterial color="#c4cbd4" />
-      </mesh>
-      {/* Language color stripe */}
-      <mesh position={[0, -0.42, 0.055]}>
-        <planeGeometry args={[0.95, 0.28]} />
-        <meshBasicMaterial color={badge.color} />
-      </mesh>
-      <Html position={[0, -0.42, 0.06]} center transform distanceFactor={5}>
-        <div style={{ color: readableOn(badge.color), fontFamily: "monospace", fontWeight: 800, fontSize: 22, letterSpacing: 1 }}>
-          {badge.label}
-        </div>
-      </Html>
-    </group>
-  );
-}
-
-function ClassArtifact({ selected, hovered }: ArtifactProps) {
-  const emissive = selected ? 0.9 : hovered ? 0.4 : 0.1;
-  return (
-    <mesh castShadow rotation={[0, 0, Math.PI / 4]}>
-      <octahedronGeometry args={[0.55, 0]} />
-      <meshStandardMaterial color={TYPE_TINT.Class} metalness={0.45} roughness={0.3} emissive={TYPE_TINT.Class} emissiveIntensity={emissive} />
-    </mesh>
-  );
-}
-
-function InterfaceArtifact({ selected, hovered }: ArtifactProps) {
-  // Hollow ring — "socket"
-  const emissive = selected ? 0.9 : hovered ? 0.4 : 0.1;
-  return (
-    <mesh castShadow rotation={[Math.PI / 2, 0, 0]}>
-      <torusGeometry args={[0.45, 0.14, 16, 40]} />
-      <meshStandardMaterial color={TYPE_TINT.Interface} metalness={0.4} roughness={0.3} emissive={TYPE_TINT.Interface} emissiveIntensity={emissive} />
-    </mesh>
-  );
-}
-
-function FunctionArtifact({ selected, hovered }: ArtifactProps) {
-  const emissive = selected ? 0.9 : hovered ? 0.4 : 0.15;
-  return (
-    <mesh castShadow>
-      <sphereGeometry args={[0.35, 24, 24]} />
-      <meshStandardMaterial color={TYPE_TINT.Function} metalness={0.4} roughness={0.25} emissive={TYPE_TINT.Function} emissiveIntensity={emissive} />
-    </mesh>
-  );
-}
-
-function ImportedModuleArtifact({ selected, hovered }: ArtifactProps) {
-  const emissive = selected ? 0.6 : hovered ? 0.3 : 0;
-  return (
-    <mesh castShadow rotation={[0, Math.PI / 4, 0]}>
-      <boxGeometry args={[0.55, 0.55, 0.55]} />
-      <meshStandardMaterial color={TYPE_TINT.ImportedModule} metalness={0.2} roughness={0.7} emissive={TYPE_TINT.ImportedModule} emissiveIntensity={emissive} wireframe />
-    </mesh>
-  );
-}
-
-function ConceptArtifact({ selected, hovered }: ArtifactProps) {
-  // Soft rounded "module" cube — a capability container you enter.
-  const emissive = selected ? 0.75 : hovered ? 0.4 : 0.18;
-  return (
-    <group>
-      <RoundedBox args={[1.25, 1.25, 1.25]} radius={0.22} smoothness={5} castShadow>
-        <meshStandardMaterial color={TYPE_TINT.Concept} metalness={0.5} roughness={0.28} emissive={TYPE_TINT.Concept} emissiveIntensity={emissive} />
-      </RoundedBox>
-      {/* faint glow shell so it reads as an enterable region */}
-      <mesh scale={1.18}>
-        <boxGeometry args={[1.25, 1.25, 1.25]} />
-        <meshBasicMaterial color={TYPE_TINT.Concept} transparent opacity={hovered || selected ? 0.14 : 0.06} />
-      </mesh>
-    </group>
-  );
-}
-
-function GroupArtifact({ selected, hovered }: ArtifactProps) {
-  // Cluster of small cubes — a sub-grouping of related files.
-  const emissive = selected ? 0.7 : hovered ? 0.35 : 0.14;
-  const mat = <meshStandardMaterial color={TYPE_TINT.Group} metalness={0.4} roughness={0.35} emissive={TYPE_TINT.Group} emissiveIntensity={emissive} />;
-  return (
-    <group>
-      <mesh position={[-0.32, 0, 0]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
-      <mesh position={[0.32, 0.1, -0.2]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
-      <mesh position={[0, -0.15, 0.28]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} />{mat}</mesh>
-    </group>
-  );
-}
-
-function Artifact(props: ArtifactProps) {
-  switch (props.node.type) {
-    // Conceptual (Map) layer
-    case "System": return <RepositoryArtifact {...props} />;
-    case "Concept": return <ConceptArtifact {...props} />;
-    case "Group": return <GroupArtifact {...props} />;
-    case "Unit": return <FileArtifact {...props} />;
-    // Physical (Files) layer
-    case "Repository": return <RepositoryArtifact {...props} />;
-    case "Folder": return <FolderArtifact {...props} />;
-    case "File": return <FileArtifact {...props} />;
-    case "Class": return <ClassArtifact {...props} />;
-    case "Interface": return <InterfaceArtifact {...props} />;
-    case "Function": return <FunctionArtifact {...props} />;
-    case "ImportedModule": return <ImportedModuleArtifact {...props} />;
-    default: return null;
-  }
-}
-
-// ---- Node group -----------------------------------------------------------
-
-function NodeGroup({ layoutNode, dense = false }: { layoutNode: LayoutNode; dense?: boolean }) {
-  const { node, position } = layoutNode;
+function SceneNode({ placed, model, dense, anchor = false, origin, hoveredId, onHover }: NodeProps) {
+  const { node, position, size } = placed;
   const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
   const selectNode = useExplorerStore((s) => s.selectNode);
   const setFocusNode = useExplorerStore((s) => s.setFocusNode);
   const setViewMode = useExplorerStore((s) => s.setViewMode);
   const childrenByParent = useExplorerStore((s) => s.childrenByParent);
+  const focusChangedAt = useExplorerStore((s) => s.focusChangedAt);
+  const overlay = useExplorerStore((s) => s.overlay);
   const hasChildren = (childrenByParent.get(node.id)?.length ?? 0) > 0;
-  const isSelected = selectedNodeId === node.id;
-  const [hovered, setHovered] = useState(false);
-  const groupRef = useRef<THREE.Group>(null);
+  const selected = selectedNodeId === node.id;
+  const hovered = hoveredId === node.id;
+  const group = useRef<THREE.Group>(null);
+  const label = useRef<HTMLDivElement>(null);
+  const { camera } = useThree();
 
-  // Subtle idle float so the scene feels alive without being distracting.
-  useFrame((state) => {
-    if (!groupRef.current) return;
-    const t = state.clock.elapsedTime;
-    const seed = position[0] * 0.31 + position[2] * 0.17;
-    groupRef.current.position.y = position[1] + Math.sin(t * 0.7 + seed) * 0.05;
+  // Time: a node that didn't exist yet at the cursor is a ghost; activity = commits around the cursor.
+  const hist = model.history.get(node.id);
+  const notYet = model.timeCursor !== null && hist ? hist.firstSeen > model.timeCursor : false;
+  const activity = hist && model.activityAt !== null && model.maxActivity > 0 ? commitsNear(hist, model.activityAt) / model.maxActivity : 0;
+
+  const flowIndex = model.flowOrder.indexOf(node.id);
+  const visual: VisualState = {
+    selected,
+    hovered,
+    dimmed: model.litIds !== null && !model.litIds.has(node.id),
+    pulse: 0,
+    activity,
+    ghost: anchor || notYet,
+  };
+
+  useFrame(({ clock }) => {
+    if (!group.current) return;
+    // Explode: children fly out from where their parent was; then a gentle idle float.
+    const p = ease((performance.now() - focusChangedAt) / EXPLODE_MS);
+    const float = dense ? 0 : Math.sin(clock.elapsedTime * 0.6 + position[0] * 0.3 + position[2] * 0.2) * 0.06;
+    group.current.position.set(
+      origin[0] + (position[0] - origin[0]) * p,
+      origin[1] + (position[1] - origin[1]) * p + float,
+      origin[2] + (position[2] - origin[2]) * p
+    );
+    group.current.scale.setScalar(0.25 + 0.75 * p);
+    // Labels fade with distance so only what's near (or relevant) speaks.
+    if (label.current) {
+      const d = camera.position.distanceTo(group.current.position);
+      const relevant = selected || hovered || flowIndex >= 0 || (model.litIds?.has(node.id) ?? false);
+      label.current.style.opacity = relevant ? "1" : dense ? "0" : String(Math.max(0, Math.min(1, (75 - d) / 25)));
+    }
   });
 
-  function handleClick(e: ThreeEvent<MouseEvent>) {
+  function onClick(e: ThreeEvent<MouseEvent>) {
     e.stopPropagation();
     selectNode(node.id);
   }
-  function handleDoubleClick(e: ThreeEvent<MouseEvent>) {
+  function onDoubleClick(e: ThreeEvent<MouseEvent>) {
     e.stopPropagation();
-    if (hasChildren) {
-      setFocusNode(node.id);
-    } else if (node.filePath) {
-      // Leaf (e.g. a Function): drill straight into its source.
-      selectNode(node.id);
-      setViewMode("source");
-    }
+    if (anchor) { selectNode(node.id); return; }
+    if (hasChildren) setFocusNode(node.id);
+    else if (node.filePath) { selectNode(node.id); setViewMode("source"); }
   }
 
-  // File/Unit carry their badge on the tile itself, so no text emblem.
-  const emblem = node.type === "File" || node.type === "Unit" ? null : TYPE_EMBLEM[node.type];
-  const kindTag =
-    node.type === "Concept" && node.kind && node.kind !== "Area"
-      ? node.kind
-      : node.type === "Group" && node.kind
-      ? node.kind
-      : node.type === "Unit" && node.role && node.role !== "Core"
-      ? node.role
-      : null;
+  const a = archetypeOf(node);
+  const glyph = model.semantic ? ARCHETYPE_GLYPH[a] : PHYSICAL_EMBLEM[node.type];
+  const tag = model.semantic
+    ? node.type === "Concept" && node.kind && node.kind !== "Area" ? node.kind : node.type === "External" ? node.kind : node.type === "Group" ? node.kind : null
+    : null;
 
   return (
     <group
-      ref={groupRef}
-      position={position}
-      onClick={handleClick}
-      onDoubleClick={handleDoubleClick}
-      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); document.body.style.cursor = "pointer"; }}
-      onPointerOut={() => { setHovered(false); document.body.style.cursor = "auto"; }}
+      ref={group}
+      position={origin}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      onPointerOver={(e) => { e.stopPropagation(); onHover(node.id); document.body.style.cursor = "pointer"; }}
+      onPointerOut={() => { onHover(null); document.body.style.cursor = "auto"; }}
     >
-      <Artifact node={node} selected={isSelected} hovered={hovered} />
-
-      {/* Selection ring */}
-      {isSelected && (
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-          <ringGeometry args={[0.9, 1.05, 40]} />
-          <meshBasicMaterial color="#58a6ff" transparent opacity={0.85} side={THREE.DoubleSide} />
-        </mesh>
+      {model.semantic ? (
+        <FlowPulse index={flowIndex} total={model.flowOrder.length}>
+          {(pulse) => (
+            <SemanticEntity
+              node={node}
+              size={size}
+              accent={model.accents.get(node.id) ?? PALETTE.cyan}
+              visual={{ ...visual, pulse }}
+              childCount={childrenByParent.get(node.id)?.length ?? 0}
+              health={overlay === "health" && !anchor}
+              animate={!dense}
+            />
+          )}
+        </FlowPulse>
+      ) : (
+        <PhysicalArtifact node={node} selected={selected} hovered={hovered} />
       )}
-
-      {/* Name label — hidden on dense levels unless hovered/selected, to stay readable and fast. */}
-      {(!dense || hovered || isSelected) && (
-        <Html distanceFactor={14} position={[0, 1.1, 0]} center>
-          <div className={`node-label ${isSelected ? "selected" : ""}`}>
-            {emblem && <span className="emblem">{emblem}</span>}
-            {kindTag && <span className="kind-tag">{kindTag}</span>}
-            <span className="name">{node.name}</span>
-            {hasChildren && <span className="chev">›</span>}
-          </div>
-        </Html>
-      )}
-    </group>
-  );
-}
-
-// ---- Edges + rig ---------------------------------------------------------
-
-function Edges({ layout }: { layout: LayoutNode[] }) {
-  const edges = useExplorerStore((s) => s.edges);
-  const byId = useMemo(() => new Map(layout.map((l) => [l.node.id, l])), [layout]);
-
-  const lines = useMemo(() => {
-    const visibleIds = new Set(layout.map((l) => l.node.id));
-    return edges
-      .filter((e) => e.type !== "Contains" && visibleIds.has(e.fromNodeId) && visibleIds.has(e.toNodeId))
-      .map((e) => ({
-        key: e.id,
-        from: byId.get(e.fromNodeId)!.position,
-        to: byId.get(e.toNodeId)!.position,
-        color: e.type === "Imports" ? "#58a6ff" : "#f0883e",
-        dashed: e.confidence === "framework-derived",
-      }));
-  }, [edges, layout, byId]);
-
-  return (
-    <>
-      {lines.map((l) => (
-        <Line key={l.key} points={[l.from, l.to]} color={l.color} lineWidth={1.4} dashed={l.dashed} transparent opacity={0.6} />
-      ))}
-    </>
-  );
-}
-
-function CameraRig({ radius, height, focusKey }: { radius: number; height: number; focusKey: string | null }) {
-  const { camera } = useThree();
-  // Re-frame only when the focused node changes (not on every render), so the
-  // user's own orbit/zoom isn't yanked back mid-interaction.
-  useEffect(() => {
-    const dist = radius * 1.6 + height * 0.6 + 6;
-    camera.position.set(dist * 0.5, height * 0.5 + dist * 0.45, dist * 0.5);
-    camera.lookAt(0, height * 0.4, 0);
-  }, [focusKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  return null;
-}
-
-/** The focused parent, rendered at the centre as the root of the visible tree. */
-function CenterNode({ node }: { node: ExplorerNode }) {
-  const focusParent = useExplorerStore((s) => s.focusParent);
-  const selectNode = useExplorerStore((s) => s.selectNode);
-  const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
-  const [hovered, setHovered] = useState(false);
-  const isSelected = selectedNodeId === node.id;
-  const canGoUp = Boolean(node.parentId);
-  const kindTag = node.type === "Concept" && node.kind && node.kind !== "Area" ? node.kind : null;
-
-  return (
-    <group
-      onClick={(e) => { e.stopPropagation(); selectNode(node.id); }}
-      onDoubleClick={(e) => { e.stopPropagation(); if (canGoUp) focusParent(); }}
-      onPointerOver={(e) => { e.stopPropagation(); setHovered(true); document.body.style.cursor = "pointer"; }}
-      onPointerOut={() => { setHovered(false); document.body.style.cursor = "auto"; }}
-    >
-      <Artifact node={node} selected={isSelected} hovered={hovered} />
-      <Html distanceFactor={16} position={[0, 1.25, 0]} center>
-        <div className={`node-label center ${isSelected ? "selected" : ""}`}>
-          {kindTag && <span className="kind-tag">{kindTag}</span>}
+      <Html position={[0, size * 1.25 + 0.5, 0]} center distanceFactor={26} style={{ pointerEvents: "none" }}>
+        <div ref={label} className={`node-label ${selected ? "selected" : ""} ${anchor ? "anchor" : ""} ${visual.dimmed ? "dimmed" : ""}`}>
+          {glyph && <span className="emblem">{glyph}</span>}
+          {tag && <span className="kind-tag">{tag}</span>}
           <span className="name">{node.name}</span>
-          {canGoUp && <span className="chev up" title="Double-click to go up">↑</span>}
+          {hasChildren && !anchor && <span className="chev">›</span>}
+          {anchor && <span className="chev">↗</span>}
         </div>
       </Html>
     </group>
   );
 }
 
-/** Links from the centre (focus) node to each child — the trunk of the tree. */
-function HierarchyLinks({ layout }: { layout: LayoutNode[] }) {
-  return (
-    <>
-      {layout.map((l) => (
-        <Line key={`trunk-${l.node.id}`} points={[[0, 0, 0], l.position]} color="#3d4b60" lineWidth={1.2} transparent opacity={0.45} />
-      ))}
-    </>
-  );
-}
-
-/** A small connected fan of each child's own children, so depth is visible without drilling. */
-function SubtreePreview({ layout }: { layout: LayoutNode[] }) {
-  const childrenByParent = useExplorerStore((s) => s.childrenByParent);
-  const { links, dots } = useMemo(() => {
-    const links: Array<{ key: string; from: [number, number, number]; to: [number, number, number]; color: string }> = [];
-    const dots: Array<{ key: string; pos: [number, number, number]; color: string }> = [];
-    if (layout.length > 18) return { links, dots }; // avoid clutter on wide levels
-    for (const l of layout) {
-      const grand = childrenByParent.get(l.node.id) ?? [];
-      const n = Math.min(grand.length, 6);
-      if (n === 0) continue;
-      const [cx, cy, cz] = l.position;
-      const baseAngle = Math.atan2(cz, cx); // point the fan outward from centre
-      const spread = 0.9;
-      for (let i = 0; i < n; i++) {
-        const ang = baseAngle + (i - (n - 1) / 2) * (spread / Math.max(n - 1, 1));
-        const gx = cx + Math.cos(ang) * 1.25;
-        const gz = cz + Math.sin(ang) * 1.25;
-        const gy = cy + 0.15;
-        const color = TYPE_TINT[grand[i].type] ?? "#8b949e";
-        links.push({ key: `gl-${l.node.id}-${i}`, from: [cx, cy, cz], to: [gx, gy, gz], color });
-        dots.push({ key: `gd-${l.node.id}-${i}`, pos: [gx, gy, gz], color });
-      }
+/** Pulses flow nodes in sequence: a wave travels along the path, step by step. */
+function FlowPulse({ index, total, children }: { index: number; total: number; children: (pulse: number) => JSX.Element }) {
+  const [pulse, setPulse] = useState(0);
+  const last = useRef(0);
+  useFrame(({ clock }) => {
+    if (index < 0 || total === 0) {
+      if (last.current !== 0) { last.current = 0; setPulse(0); }
+      return;
     }
-    return { links, dots };
-  }, [layout, childrenByParent]);
+    const cycle = (clock.elapsedTime * 1.4) % (total + 2);
+    const d = Math.abs(cycle - index);
+    const v = d < 1 ? 1 - d * 0.6 : 0.35; // every node on the path stays lit; the wave brightens it
+    if (Math.abs(v - last.current) > 0.05) { last.current = v; setPulse(v); }
+  });
+  return children(pulse);
+}
 
+// ---- Focus: system core or domain zone ----------------------------------------
+
+function FocusMarker({ model, hoveredId, onHover }: { model: SceneModel; hoveredId: string | null; onHover: (id: string | null) => void }) {
+  const focusParent = useExplorerStore((s) => s.focusParent);
+  const selectNode = useExplorerStore((s) => s.selectNode);
+  const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
+  const focus = model.focus;
+  if (!focus || !model.semantic) return null;
+
+  if (focus.type === "System") {
+    // The system's semantic core: the centre everything is organised around.
+    return (
+      <group
+        position={[0, CORE_Y, 0]}
+        onClick={(e) => { e.stopPropagation(); selectNode(focus.id); }}
+        onPointerOver={(e) => { e.stopPropagation(); onHover(focus.id); }}
+        onPointerOut={() => onHover(null)}
+      >
+        <SemanticEntity
+          node={focus}
+          size={sizeOf(focus)}
+          accent={PALETTE.white}
+          visual={{ selected: selectedNodeId === focus.id, hovered: hoveredId === focus.id, dimmed: false, pulse: 0, activity: 0, ghost: false }}
+          childCount={0}
+          health={false}
+          animate
+        />
+        <Html position={[0, sizeOf(focus) * 1.9, 0]} center distanceFactor={26} style={{ pointerEvents: "none" }}>
+          <div className="node-label center"><span className="emblem">◉</span><span className="name">{focus.name}</span></div>
+        </Html>
+      </group>
+    );
+  }
+
+  // Inside a domain/component: it becomes the zone that contains everything you see.
+  const half = model.layout.radius + 1.5;
+  const top = model.layout.top + 2.2;
+  const bottom = model.layout.bottom - 1.2;
+  const accent = model.accents.get(focus.id) ?? PALETTE.cyan;
   return (
-    <>
-      {links.map((o) => (
-        <Line key={o.key} points={[o.from, o.to]} color={o.color} lineWidth={1} transparent opacity={0.28} />
-      ))}
-      {dots.map((d) => (
-        <mesh key={d.key} position={d.pos}>
-          <sphereGeometry args={[0.11, 10, 10]} />
-          <meshStandardMaterial color={d.color} emissive={d.color} emissiveIntensity={0.35} />
-        </mesh>
-      ))}
-    </>
+    <group>
+      <mesh position={[0, (top + bottom) / 2, 0]} raycast={() => null}>
+        <boxGeometry args={[half * 2, top - bottom, half * 2]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.015} depthWrite={false} side={THREE.BackSide} />
+        <Edges color={accent} transparent opacity={0.22} />
+      </mesh>
+      <Html position={[0, top + 0.4, 0]} center distanceFactor={30}>
+        <div className="node-label center zone" onDoubleClick={() => focusParent()} title="Double-click to go up a level">
+          <span className="emblem">{ARCHETYPE_GLYPH[archetypeOf(focus)]}</span>
+          <span className="name">{focus.name}</span>
+          <span className="chev up">↑</span>
+        </div>
+      </Html>
+    </group>
   );
 }
 
-function SceneContent() {
-  const focusNodeId = useExplorerStore((s) => s.focusNodeId);
-  const childrenByParent = useExplorerStore((s) => s.childrenByParent);
-  const nodesById = useExplorerStore((s) => s.nodesById);
-  const selectNode = useExplorerStore((s) => s.selectNode);
+// ---- Camera ----------------------------------------------------------------------
 
-  const focusNode = focusNodeId ? nodesById.get(focusNodeId) ?? null : null;
-  const children = focusNodeId ? childrenByParent.get(focusNodeId) ?? [] : [];
-  const layout = useMemo(() => layoutChildren(children), [children]);
-  const { radius, height } = layoutExtent(layout);
-  const dense = layout.length > 40;
-  const maxDist = radius * 3 + height * 2 + 30;
+/** Eases to a 3/4 view of the layer stack whenever the focus changes (never mid-orbit). */
+function CameraRig({ layout, focusKey }: { layout: SceneLayout; focusKey: string | null }) {
+  const { camera, controls } = useThree() as unknown as { camera: THREE.PerspectiveCamera; controls: { target: THREE.Vector3; update: () => void } | null };
+  const anim = useRef<{ key: string | null; start: number; fromPos: THREE.Vector3; fromTarget: THREE.Vector3; toPos: THREE.Vector3; toTarget: THREE.Vector3 } | null>(null);
+
+  useFrame(() => {
+    if (!anim.current || anim.current.key !== focusKey) {
+      const midY = (layout.top + layout.bottom) / 2;
+      const height = layout.top - layout.bottom;
+      // Fit both the plan radius and the layer stack height in a 45° field of view.
+      const dist = Math.max(layout.radius * 1.35, height * 1.15) + 8;
+      anim.current = {
+        key: focusKey,
+        start: performance.now(),
+        fromPos: camera.position.clone(),
+        fromTarget: controls?.target.clone() ?? new THREE.Vector3(),
+        toPos: new THREE.Vector3(dist * 0.62, midY + dist * 0.42, dist * 0.62),
+        toTarget: new THREE.Vector3(0, midY, 0),
+      };
+    }
+    const a = anim.current;
+    const t = (performance.now() - a.start) / 800;
+    if (t > 1.05) return;
+    const p = ease(t);
+    camera.position.lerpVectors(a.fromPos, a.toPos, p);
+    if (controls) {
+      controls.target.lerpVectors(a.fromTarget, a.toTarget, p);
+      controls.update();
+    } else camera.lookAt(a.toTarget);
+  });
+  return null;
+}
+
+// ---- Scene -----------------------------------------------------------------------
+
+function SceneContent({ model }: { model: SceneModel }) {
+  const selectNode = useExplorerStore((s) => s.selectNode);
+  const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
+  const nodesById = useExplorerStore((s) => s.nodesById);
+  const links = useExplorerStore((s) => s.links);
+  const edges = useExplorerStore((s) => s.edges);
+  const focusFromId = useExplorerStore((s) => s.focusFromId);
+  const focusNodeId = useExplorerStore((s) => s.focusNodeId);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  const { layout } = model;
+  const dense = layout.placed.length > DENSE;
+  const maxDist = layout.radius * 4 + (layout.top - layout.bottom) * 2 + 40;
+
+  // Explode origin: going down, children burst from the centre; going up, from the node we came out of.
+  const origin = useMemo<Vec3>(() => {
+    const from = focusFromId ? model.positions.get(focusFromId) : undefined;
+    if (from) return from;
+    return model.semantic ? [0, (layout.top + layout.bottom) / 2, 0] : [0, 0, 0];
+  }, [focusFromId, model.positions, model.semantic, layout.top, layout.bottom]);
+
+  const focusIds = useMemo(() => new Set([selectedNodeId, hoveredId].filter((x): x is string => Boolean(x))), [selectedNodeId, hoveredId]);
+  const selectedPlaced = [...layout.placed, ...layout.anchors].find((p) => p.node.id === selectedNodeId);
+  const selectedNode = selectedNodeId ? nodesById.get(selectedNodeId) : undefined;
+  const cardPos: Vec3 | undefined = selectedPlaced?.position ?? (selectedNode && selectedNode.id === model.focus?.id && model.focus?.type === "System" ? [0, CORE_Y, 0] : undefined);
 
   return (
     <>
-      <CameraRig radius={radius} height={height} focusKey={focusNodeId} />
-      <hemisphereLight args={["#c9d6e6", "#0d1117", 0.55]} />
-      <directionalLight position={[15, 20, 10]} intensity={0.75} castShadow />
-      <pointLight position={[-12, 8, -12]} intensity={0.25} color="#58a6ff" />
+      <CameraRig layout={layout} focusKey={focusNodeId} />
+      <ambientLight intensity={0.35} />
+      <hemisphereLight args={["#bcd3ea", "#05070b", 0.45]} />
+      <directionalLight position={[15, 25, 10]} intensity={0.55} />
 
       <Grid
-        args={[80, 80]}
+        args={[120, 120]}
         cellSize={1}
-        cellColor="#1c2431"
-        sectionSize={5}
-        sectionColor="#2a3441"
-        fadeDistance={45}
-        fadeStrength={1.4}
+        cellColor={PALETTE.grid}
+        sectionSize={6}
+        sectionColor={PALETTE.gridSection}
+        fadeDistance={70}
+        fadeStrength={1.6}
         infiniteGrid
-        position={[0, -0.55, 0]}
+        position={[0, layout.bottom - 2.2, 0]}
       />
-
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.56, 0]} onClick={() => selectNode(null)}>
-        <planeGeometry args={[400, 400]} />
-        <meshBasicMaterial color="#0d1117" transparent opacity={0} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, layout.bottom - 2.21, 0]} onClick={() => selectNode(null)}>
+        <planeGeometry args={[600, 600]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
 
-      {/* Interconnected tree: centre → children → grandchild preview */}
-      <HierarchyLinks layout={layout} />
-      <SubtreePreview layout={layout} />
-      {focusNode && <CenterNode node={focusNode} />}
-      <Edges layout={layout} />
-      {layout.map((l) => (
-        <NodeGroup key={l.node.id} layoutNode={l} dense={dense} />
+      {model.semantic && layout.mode === "layered" && <LayerPlanes layers={layout.layers} radius={layout.radius} spine={model.focus?.type === "System"} />}
+      <FocusMarker model={model} hoveredId={hoveredId} onHover={setHoveredId} />
+      <Links
+        positions={model.positions}
+        nodesById={nodesById}
+        accents={model.accents}
+        links={model.semantic ? links : []}
+        edges={model.semantic ? [] : edges}
+        flowKeys={model.flowKeys}
+        focusIds={focusIds}
+        litIds={model.litIds}
+      />
+      {layout.placed.map((p) => (
+        <SceneNode key={p.node.id} placed={p} model={model} dense={dense} origin={origin} hoveredId={hoveredId} onHover={setHoveredId} />
       ))}
-      <OrbitControls enablePan enableDamping dampingFactor={0.12} minDistance={2.5} maxDistance={maxDist} target={[0, height * 0.4, 0]} makeDefault />
+      {layout.anchors.map((p) => (
+        <SceneNode key={`anchor-${p.node.id}`} placed={p} model={model} dense={dense} anchor origin={p.position} hoveredId={hoveredId} onHover={setHoveredId} />
+      ))}
+      {selectedNode && cardPos && (
+        <SystemCard node={selectedNode} position={cardPos} offset={(selectedPlaced?.size ?? 1.2) * 1.6 + 0.6} history={model.history.get(selectedNode.id) ?? null} chainOf={model.chainOf} />
+      )}
+      <OrbitControls enablePan enableDamping dampingFactor={0.12} minDistance={2.5} maxDistance={maxDist} makeDefault />
     </>
-  );
-}
-
-// ---- Minimap + shell ------------------------------------------------------
-
-function Minimap() {
-  const focusNodeId = useExplorerStore((s) => s.focusNodeId);
-  const childrenByParent = useExplorerStore((s) => s.childrenByParent);
-  const selectedNodeId = useExplorerStore((s) => s.selectedNodeId);
-  const children = focusNodeId ? childrenByParent.get(focusNodeId) ?? [] : [];
-  const layout = useMemo(() => layoutChildren(children), [children]);
-  const maxR = layout.length > 0 ? Math.max(...layout.map((l) => Math.hypot(l.position[0], l.position[2]))) : 1;
-
-  return (
-    <div className="minimap">
-      <svg width="100%" height="100%" viewBox="-60 -60 120 120">
-        <circle cx={0} cy={0} r={2.5} fill="var(--accent)" />
-        {layout.map((l) => {
-          const x = (l.position[0] / maxR) * 50;
-          const y = (l.position[2] / maxR) * 50;
-          const isSelected = l.node.id === selectedNodeId;
-          return <circle key={l.node.id} cx={x} cy={y} r={isSelected ? 3 : 2} fill={TYPE_TINT[l.node.type] ?? "#888"} />;
-        })}
-      </svg>
-    </div>
-  );
-}
-
-function Legend() {
-  const layer = useExplorerStore((s) => s.layer);
-  const items: Array<{ label: string; swatch: React.ReactNode }> =
-    layer === "semantic"
-      ? [
-          { label: "Concept", swatch: <span className="swatch concept">🧩</span> },
-          { label: "Group", swatch: <span className="swatch group">▦</span> },
-          { label: "File", swatch: <span className="swatch file">TS</span> },
-          { label: "Function", swatch: <span className="swatch function">ƒ</span> },
-        ]
-      : [
-          { label: "Folder", swatch: <span className="swatch folder">📁</span> },
-          { label: "File", swatch: <span className="swatch file">TS</span> },
-          { label: "Class", swatch: <span className="swatch class">{"{ }"}</span> },
-          { label: "Interface", swatch: <span className="swatch interface">{"<>"}</span> },
-          { label: "Function", swatch: <span className="swatch function">ƒ</span> },
-        ];
-  return (
-    <div className="legend">
-      {items.map((it) => (
-        <div key={it.label} className="legend-item">
-          {it.swatch}
-          <span>{it.label}</span>
-        </div>
-      ))}
-    </div>
   );
 }
 
 export function Graph3DScene() {
-  const focusNodeId = useExplorerStore((s) => s.focusNodeId);
-  const childrenByParent = useExplorerStore((s) => s.childrenByParent);
-  const hasChildren = focusNodeId ? (childrenByParent.get(focusNodeId)?.length ?? 0) > 0 : false;
+  const model = useSceneModel();
+  const [flowsOpen, setFlowsOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const empty = model.layout.placed.length === 0;
 
   return (
-    <div style={{ position: "relative", height: "100%" }}>
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        camera={{ fov: 50, position: [8, 6, 8] }}
-        onPointerMissed={() => useExplorerStore.getState().selectNode(null)}
-      >
-        <color attach="background" args={[new THREE.Color("#0a0f18")]} />
-        <fog attach="fog" args={["#0a0f18", 30, 90]} />
-        <SceneContent />
+    <div className="scene-root">
+      <Canvas dpr={[1, 2]} camera={{ fov: 45, position: [24, 16, 24] }} onPointerMissed={() => useExplorerStore.getState().selectNode(null)}>
+        <color attach="background" args={[PALETTE.background]} />
+        <fog attach="fog" args={[PALETTE.fog, 60, 170]} />
+        <SceneContent model={model} />
+        {/* Very low bloom: only the brightest cores/frames (toneMapped=false) pick up a luminous edge. */}
+        <EffectComposer multisampling={4}>
+          <Bloom intensity={0.45} luminanceThreshold={0.62} luminanceSmoothing={0.2} mipmapBlur />
+        </EffectComposer>
       </Canvas>
-      <Minimap />
-      <Legend />
-      {!hasChildren && (
-        <div
-          style={{
-            position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-            color: "var(--text-dim)", pointerEvents: "none",
-          }}
-        >
-          This node has no children to display.
-        </div>
+
+      {model.semantic && <LevelIndicator level={levelOf(model.focus)} />}
+      {model.semantic && (
+        <HudToolbar flowsOpen={flowsOpen} onToggleFlows={() => setFlowsOpen((v) => !v)} timelineOpen={timelineOpen} onToggleTimeline={() => setTimelineOpen((v) => !v)} />
       )}
-      <div style={{ position: "absolute", top: 12, left: 12, fontSize: 11, color: "var(--text-dim)" }}>
-        Double-click a node to zoom in · scroll out to zoom out · click empty space to deselect
-      </div>
+      {model.semantic && flowsOpen && <FlowPanel onClose={() => setFlowsOpen(false)} />}
+      {model.semantic && timelineOpen && <Timeline />}
+      <Minimap layout={model.layout} />
+      <Legend semantic={model.semantic} />
+      {empty && <div className="scene-empty">This node has no children to display.</div>}
+      <div className="scene-hint">Double-click to explode · click for details · scroll to zoom · drag to orbit</div>
     </div>
   );
-}
-
-// ---- Utils ----------------------------------------------------------------
-
-function readableOn(hex: string): string {
-  const h = hex.replace("#", "");
-  const r = parseInt(h.slice(0, 2), 16);
-  const g = parseInt(h.slice(2, 4), 16);
-  const b = parseInt(h.slice(4, 6), 16);
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  return luminance > 0.55 ? "#0d1117" : "#ffffff";
 }

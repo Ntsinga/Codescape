@@ -4,6 +4,7 @@ import path from "node:path";
 import { nanoid } from "nanoid";
 import { uploadsTmpDir } from "../storage/paths.js";
 import { processRepoZip } from "../ingestion/processRepo.js";
+import { getAuth } from "../auth.js";
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -26,9 +27,10 @@ uploadRouter.post("/repos", upload.single("archive"), async (req, res) => {
     return;
   }
   const displayName = (req.body?.name as string | undefined)?.trim() || path.basename(req.file.originalname, ".zip");
+  const { userId } = getAuth(req);
 
   try {
-    const result = await processRepoZip(req.file.path, displayName, { origin: { kind: "zip", owner: null, repo: null, branch: null } });
+    const result = await processRepoZip(req.file.path, displayName, { origin: { kind: "zip", owner: null, repo: null, branch: null }, userId: userId! });
     res.status(201).json(result);
   } catch (err) {
     res.status(422).json({ error: err instanceof Error ? err.message : "Failed to process repository" });

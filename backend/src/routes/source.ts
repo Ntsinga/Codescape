@@ -1,12 +1,13 @@
 import { Router } from "express";
-import { getRepo, getFileContent } from "../graph/queries.js";
+import { getRepoForUser, getFileContent } from "../graph/queries.js";
 import { isSecretLike } from "../ingestion/ignoreRules.js";
+import { getAuth } from "../auth.js";
 
 export const sourceRouter = Router();
 
 sourceRouter.get("/repos/:id/source", async (req, res) => {
   try {
-    const repo = await getRepo(req.params.id);
+    const repo = await getRepoForUser(req.params.id, getAuth(req).userId!);
     if (!repo) {
       res.status(404).json({ error: "Repository not found" });
       return;
