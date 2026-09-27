@@ -61,17 +61,21 @@ async function main() {
   app.get("/", (_req, res) => res.json(apiIndex));
   app.get("/api", (_req, res) => res.json(apiIndex));
 
-  // Each router below serves per-user data (repos, graph, source, AI actions), so
-  // every route in them requires a signed-in Clerk user. githubRouter is the one
-  // exception: it gates each of its routes individually, because /github/callback
-  // is a plain browser navigation from GitHub (no Authorization header to check)
-  // rather than one of the frontend's authenticated fetch calls.
+  // githubRouter gates each of its routes individually, because /github/callback
+  // is a plain browser navigation from GitHub (no Authorization header to check;
+  // it's protected by the one-time, user-bound OAuth `state` instead). It must be
+  // mounted FIRST: `app.use("/api", requireUser, x)` runs requireUser for every
+  // /api request that reaches that mount, whether or not x has a matching route,
+  // so anything mounted after the first requireUser mount can't be public.
+  app.use("/api", githubRouter);
+
+  // Every other router serves per-user data (repos, graph, source, AI actions),
+  // so every route in them requires a signed-in Clerk user.
   app.use("/api", requireUser, uploadRouter);
   app.use("/api", requireUser, reposRouter);
   app.use("/api", requireUser, graphRouter);
   app.use("/api", requireUser, sourceRouter);
   app.use("/api", requireUser, aiRouter);
-  app.use("/api", githubRouter);
   app.use("/api", requireUser, semanticRouter);
 
   const port = Number(process.env.PORT) || 4000;
