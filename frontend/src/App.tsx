@@ -11,10 +11,11 @@ function AuthedApp() {
 
   // Wires the api client (a plain module, outside React) to this session's
   // token getter so every request it makes carries the signed-in user's auth.
-  useEffect(() => {
-    setAuthTokenGetter(() => getToken());
-    return () => setAuthTokenGetter(null);
-  }, [getToken]);
+  // Set during render, not in an effect: React runs child effects before the
+  // parent's, so the views' first requests on mount would otherwise go out
+  // unauthenticated (401 "Sign in required"). Storing the getter is idempotent.
+  setAuthTokenGetter(() => getToken());
+  useEffect(() => () => setAuthTokenGetter(null), []);
 
   return (
     <>
