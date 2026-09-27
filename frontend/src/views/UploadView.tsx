@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { deleteRepo, getGraph, getSemantic, importGitHubRepo, listGitHubRepos, listRepos, reimportGitHubRepo, uploadRepo, warmup } from "../api/client";
 import type { GitHubRepo, RepoSummary } from "../api/types";
 import { useExplorerStore } from "../state/store";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 export function UploadView() {
   const [dragOver, setDragOver] = useState(false);
@@ -12,6 +13,7 @@ export function UploadView() {
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [githubConnection, setGithubConnection] = useState<string | null>(null);
   const [githubLoading, setGithubLoading] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<RepoSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadRepo = useExplorerStore((s) => s.loadRepo);
 
@@ -88,8 +90,14 @@ export function UploadView() {
     }
   }
 
-  async function removeRepo(repo: RepoSummary) {
-    if (!window.confirm(`Delete "${repo.name}" and its analysis? This can't be undone.`)) return;
+  function removeRepo(repo: RepoSummary) {
+    setPendingDelete(repo);
+  }
+
+  async function confirmDelete() {
+    const repo = pendingDelete;
+    if (!repo) return;
+    setPendingDelete(null);
     setError(null);
     try {
       await deleteRepo(repo.id);
@@ -277,6 +285,16 @@ export function UploadView() {
       <footer className="landing-footer">
         <a href="https://github.com/Ntsinga/Codescape" target="_blank" rel="noreferrer">Codescape on GitHub</a>
       </footer>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete repository"
+        message={pendingDelete ? `Delete "${pendingDelete.name}" and its analysis? This can't be undone.` : ""}
+        confirmLabel="Delete"
+        danger
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
