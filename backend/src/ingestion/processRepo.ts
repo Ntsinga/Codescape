@@ -98,6 +98,14 @@ export function processRepoZip(zipPath: string, displayName: string, options: Pr
   return run;
 }
 
+// TEMPORARY diagnostics: pinpoint exactly which pipeline stage spikes memory on a
+// crashing import. Cheap (one process.memoryUsage() call + a console.log), and
+// gated so it can't spam logs on a large repo. Remove once the real cause is found.
+function logMem(stage: string): void {
+  const m = process.memoryUsage();
+  console.log(`[mem] ${stage}: rss=${(m.rss / 1024 / 1024).toFixed(1)}MB heapUsed=${(m.heapUsed / 1024 / 1024).toFixed(1)}MB external=${(m.external / 1024 / 1024).toFixed(1)}MB arrayBuffers=${(m.arrayBuffers / 1024 / 1024).toFixed(1)}MB`);
+}
+
 function assertMemoryBudget(): void {
   const rss = process.memoryUsage().rss;
   if (rss > MAX_INGEST_RSS_BYTES) {
@@ -128,11 +136,14 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
 
   const destDir = repoSourceDir(repoId);
   try {
+    logMem(`start (repo=${repoId})`);
     await fs.mkdir(destDir, { recursive: true });
     const extractedRaw = await extractZip(zipPath, destDir);
+    logMem(`after extractZip (${extractedRaw.length} files)`);
     // GitHub/GitLab zipballs wrap everything in a single top-level folder
     // (e.g. `owner-repo-<sha>/`) — strip it so the repo root reflects real content.
     const extracted = await stripCommonPrefix(extractedRaw, destDir);
+    logMem("after stripCommonPrefix");
 
     const fileInputs: FileInput[] = [];
     let fileRecords: Array<{ id: string; repoId: string; path: string; language: string | null }> = [];
@@ -147,13 +158,16 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
       if (contentsToStore.length) { await insertFileContentsBatch(repoId, contentsToStore); contentsToStore = []; }
     };
 
+    let fileIndex = 0;
     for (const file of extracted) {
+      fileIndex += 1;
       const language = detectLanguageByExtension(file.relativePath);
       fileInputs.push({ relativePath: file.relativePath, language });
       fileRecords.push({ id: nanoid(10), repoId, path: file.relativePath, language: language === "unknown" ? null : language });
 
       const sourceText = await fs.readFile(file.absolutePath, "utf-8").catch(() => null);
       if (sourceText === null) continue;
+      logMem(`file ${fileIndex}/${extracted.length} ${file.relativePath} (${sourceText.length} chars, lang=${language})`);
 
       // A NUL byte means the file is binary (or wrong-encoded) — Postgres TEXT
       // can't hold 0x00, and it isn't real source, so skip storing and parsing it.
@@ -181,15 +195,19 @@ async function processRepoZipInner(zipPath: string, displayName: string, options
     }
 
     await flush();
+    logMem("after file loop + final flush");
 
     const { nodes, edges } = buildGraph(repoId, displayName, fileInputs, parsedByPath);
+    logMem(`after buildGraph (${nodes.length} nodes, ${edges.length} edges)`);
     await insertNodesBatch(nodes);
     await insertEdgesBatch(edges);
+    logMem("after insertNodesBatch/insertEdgesBatch");
 
     // Deterministic semantic decomposition, stored immediately (no API key / latency
     // cost). AI enrichment of names/summaries happens on demand via /decompose.
     const semanticTree = addSubgroups(buildSemanticTree(displayName, nodes), buildFileAdjacency(nodes, edges));
     await saveSemanticTree(repoId, semanticTree, false);
+    logMem("after semantic tree");
 
     await updateRepoStatus(repoId, "ready");
 
