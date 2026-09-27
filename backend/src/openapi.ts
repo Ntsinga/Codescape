@@ -138,13 +138,12 @@ export const openApiSpec = {
         responses: { "200": { description: "Updated selection", content: jsonExample({ current: { provider: "gemini", model: "gemini-3.6-flash" } }) }, "400": errRef() },
       },
     },
-    "/api/github/connect": {
-      get: {
+    "/api/github/connect-url": {
+      post: {
         tags: ["GitHub"],
-        summary: "Begin GitHub OAuth for the signed-in user (redirects to GitHub)",
-        security: [],
-        parameters: [{ name: "token", in: "query", required: true, description: "Clerk session token (this route is a browser navigation, not a fetch, so it can't carry an Authorization header)", schema: { type: "string" } }],
-        responses: { "302": { description: "Redirect to GitHub authorize" } },
+        summary: "Begin GitHub OAuth for the signed-in user; returns the GitHub authorize URL to navigate to",
+        security: [{ bearerAuth: [] }],
+        responses: { "200": { description: "Authorize URL", content: jsonExample({ url: "https://github.com/login/oauth/authorize?client_id=...&state=..." }) }, "401": errRef() },
       },
     },
     "/api/github/repos": {
