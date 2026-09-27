@@ -117,7 +117,7 @@ export const openApiSpec = {
         tags: ["AI"],
         summary: "AI explanation of a class/function, with source evidence",
         parameters: [pathId(), { name: "nodeId", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Explanation", content: jsonExample({ explanation: "…", evidence: [] }) }, "502": errRef() },
+        responses: { "200": { description: "Explanation", content: jsonExample({ purpose: "…", behavior: "…", notes: [], evidence: [] }) }, "502": errRef() },
       },
     },
     "/api/ai/models": {

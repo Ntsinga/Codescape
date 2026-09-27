@@ -50,7 +50,9 @@ export interface RepoSummary {
 }
 
 export interface ExplainResult {
-  explanation: string;
+  purpose: string;
+  behavior: string;
+  notes: string[];
   evidence: EvidenceRef[];
 }
 

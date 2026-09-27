@@ -304,7 +304,21 @@ a { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
-  white-space: pre-wrap;
+}
+.explain-section { margin-bottom: 12px; }
+.explain-section:last-of-type { margin-bottom: 0; }
+.explain-section p { margin: 0; }
+.explain-section ul { margin: 0; padding-left: 18px; }
+.explain-section li { margin-bottom: 4px; }
+.explain-section li:last-child { margin-bottom: 0; }
+.explain-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 3px;
 }
 .evidence-list { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-family: monospace; }
 

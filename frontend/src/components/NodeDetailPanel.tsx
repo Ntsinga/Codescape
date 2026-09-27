@@ -117,7 +117,26 @@ export function NodeDetailPanel() {
           {explainError && <p style={{ color: "var(--red)", fontSize: 12 }}>{explainError}</p>}
           {explainResult && (
             <div className="explain-box">
-              {explainResult.explanation}
+              {explainResult.purpose && (
+                <div className="explain-section">
+                  <span className="explain-label">Purpose</span>
+                  <p>{explainResult.purpose}</p>
+                </div>
+              )}
+              <div className="explain-section">
+                <span className="explain-label">Behavior</span>
+                <p>{explainResult.behavior}</p>
+              </div>
+              {explainResult.notes.length > 0 && (
+                <div className="explain-section">
+                  <span className="explain-label">Notable</span>
+                  <ul>
+                    {explainResult.notes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="evidence-list">
                 Evidence: {explainResult.evidence.map((e) => `${e.file}:${e.startLine}-${e.endLine}`).join(", ")}
               </div>
